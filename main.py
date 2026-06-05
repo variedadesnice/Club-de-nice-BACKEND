@@ -9,10 +9,15 @@ from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from routes import auth, courses, posts, tags
 
-app = FastAPI(title="Comunyapp API", version="1.0.0", redirect_slashes=False)
+app = FastAPI(title="Comunyapp API", version="1.0.0")
+
+# Railway usa un proxy que pasa X-Forwarded-Proto: https
+# Sin esto, los redirects de FastAPI generan URLs http:// en vez de https://
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 app.add_middleware(
     CORSMiddleware,
