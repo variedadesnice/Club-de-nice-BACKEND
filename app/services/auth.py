@@ -32,8 +32,14 @@ def register(name: str, email: str, password: str) -> dict:
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[auth.register] step 1/3 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
-        if "already registered" in msg.lower() or "already been registered" in msg.lower():
+        msg_lower = msg.lower()
+        if "already registered" in msg_lower or "already been registered" in msg_lower:
             raise HTTPException(status_code=400, detail="Este email ya está registrado. Intenta iniciar sesión.")
+        if "user not allowed" in msg_lower:
+            raise HTTPException(
+                status_code=400,
+                detail="El registro está deshabilitado. Activa 'Enable email signup' en Supabase Dashboard → Authentication → Providers → Email.",
+            )
         raise HTTPException(status_code=400, detail=msg)
 
     user_id = auth_resp.user.id
