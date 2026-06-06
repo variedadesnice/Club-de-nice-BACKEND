@@ -125,6 +125,13 @@ def delete_invitation(invitation_id: str) -> None:
     logger.info("[invitations.delete] OK id=%s", invitation_id)
 
 
+def _normalize_rpc(data) -> dict:
+    """Supabase RPCs can return a list or a dict depending on how they're defined."""
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return data or {}
+
+
 def validate_token(token: str) -> dict:
     """
     Llama al RPC validate_invitation(invite_token) de Supabase.
@@ -144,8 +151,9 @@ def validate_token(token: str) -> dict:
         logger.error("[invitations.validate] RPC FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=msg)
 
-    logger.info("[invitations.validate] result=%s", result.data)
-    return result.data
+    normalized = _normalize_rpc(result.data)
+    logger.info("[invitations.validate] result=%s", normalized)
+    return normalized
 
 
 def use_token(token: str) -> dict:
@@ -161,10 +169,9 @@ def use_token(token: str) -> dict:
     logger.info("[invitations.use] token=%s", token)
     supabase = get_supabase()
 
-    # Validar antes de intentar usar para devolver error claro
     try:
         validate_result = supabase.rpc("validate_invitation", {"invite_token": token}).execute()
-        validation = validate_result.data
+        validation = _normalize_rpc(validate_result.data)
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[invitations.use] validate RPC FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
