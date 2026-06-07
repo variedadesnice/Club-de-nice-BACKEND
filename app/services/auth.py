@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from app.core.exceptions import supabase_error
-from app.core.supabase import get_supabase
+from app.core.supabase import create_anon_client, get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +58,11 @@ def register(name: str, email: str, password: str, role: str = "miembro") -> dic
 
     logger.info("[auth.register] step 2/3 OK")
 
-    # 3. Auto-login
+    # 3. Auto-login — uses a fresh client to avoid contaminating the admin singleton's session state
     logger.info("[auth.register] step 3/3 - attempting auto-login")
     try:
-        session_resp = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        anon_client = create_anon_client()
+        session_resp = anon_client.auth.sign_in_with_password({"email": email, "password": password})
         token = session_resp.session.access_token
     except Exception as exc:
         logger.warning(
@@ -87,9 +88,10 @@ def login(email: str, password: str) -> dict:
     """
     logger.info("[auth.login] start - email=%s", email)
     supabase = get_supabase()
+    anon_client = create_anon_client()
 
     try:
-        session_resp = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        session_resp = anon_client.auth.sign_in_with_password({"email": email, "password": password})
     except Exception as exc:
         msg = supabase_error(exc)
         logger.warning("[auth.login] FAILED for %s [%s] %s", email, type(exc).__name__, msg)
