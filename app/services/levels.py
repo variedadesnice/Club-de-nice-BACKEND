@@ -17,10 +17,10 @@ def _get_tier_for_level(supabase, level: int) -> Optional[dict]:
             .select("id, name, min_level, max_level, description, icon_url")
             .lte("min_level", level)
             .gte("max_level", level)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        return resp.data
+        return resp.data[0] if resp.data else None
     except Exception:
         return None
 
@@ -55,10 +55,10 @@ def get_user_level(user_id: str) -> dict:
             supabase.table("user_levels")
             .select("*")
             .eq("user_id", user_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        data = resp.data
+        data = resp.data[0] if resp.data else None
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[levels.get_user_level] FAILED user_id=%s [%s] %s", user_id, type(exc).__name__, msg, exc_info=True)
@@ -176,10 +176,10 @@ def process_achievement(user_id: str, achievement_code: str, metadata: Optional[
             .select("id, code, name, xp_reward, is_repeatable, daily_limit, is_active")
             .eq("code", achievement_code)
             .eq("is_active", True)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        atype = atype_resp.data
+        atype = atype_resp.data[0] if atype_resp.data else None
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[levels.process_achievement] atype fetch FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
@@ -200,7 +200,7 @@ def process_achievement(user_id: str, achievement_code: str, metadata: Optional[
                 .select("id")
                 .eq("user_id", user_id)
                 .eq("achievement_type_id", achievement_type_id)
-                .maybe_single()
+                .limit(1)
                 .execute()
             )
             if existing.data:
@@ -363,7 +363,7 @@ def admin_award(user_id: str, xp_amount: int, reason: str) -> dict:
     supabase = get_supabase()
 
     try:
-        profile = supabase.table("profiles").select("id").eq("id", user_id).maybe_single().execute()
+        profile = supabase.table("profiles").select("id").eq("id", user_id).limit(1).execute()
         if not profile.data:
             raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     except HTTPException:
@@ -378,11 +378,11 @@ def admin_award(user_id: str, xp_amount: int, reason: str) -> dict:
             supabase.table("achievement_types")
             .select("id")
             .eq("code", "admin_award")
-            .maybe_single()
+            .limit(1)
             .execute()
         )
         if atype.data:
-            admin_type_id = atype.data["id"]
+            admin_type_id = atype.data[0]["id"]
     except Exception:
         pass
 
@@ -444,7 +444,7 @@ def admin_create_achievement(data: dict) -> dict:
             supabase.table("achievement_types")
             .select("id")
             .eq("code", data["code"])
-            .maybe_single()
+            .limit(1)
             .execute()
         )
         if existing.data:
