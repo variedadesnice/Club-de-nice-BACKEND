@@ -129,6 +129,9 @@ def login(email: str, password: str) -> dict:
             "avatar": profile.get("avatar"),
             "bio": profile.get("bio"),
             "subscription_status": profile.get("subscription_status"),
+            "gender": profile.get("gender"),
+            "city": profile.get("city"),
+            "phone": profile.get("phone"),
         },
         "token": token,
     }
@@ -168,6 +171,9 @@ def get_me(user_id: str, email: str) -> dict:
             "avatar": profile.get("avatar"),
             "bio": profile.get("bio"),
             "subscription_status": profile.get("subscription_status"),
+            "gender": profile.get("gender"),
+            "city": profile.get("city"),
+            "phone": profile.get("phone"),
         }
     }
 
@@ -208,7 +214,8 @@ def upload_avatar(user_id: str, image_data: str) -> dict:
     return {"url": url}
 
 
-def update_profile(user_id: str, name: str, avatar: str, bio: str) -> dict:
+def update_profile(user_id: str, name: str, avatar: str, bio: str,
+                   gender: str | None = None, city: str | None = None, phone: str | None = None) -> dict:
     """
     Returns:
         {"user": {...}}
@@ -220,10 +227,17 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str) -> dict:
     supabase = get_supabase()
 
     try:
-        supabase.table("profiles").update({
+        update_data: dict = {
             "name": name, "avatar": avatar, "bio": bio,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", user_id).execute()
+        }
+        if gender is not None:
+            update_data["gender"] = gender
+        if city is not None:
+            update_data["city"] = city
+        if phone is not None:
+            update_data["phone"] = phone
+        supabase.table("profiles").update(update_data).eq("id", user_id).execute()
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[auth.update_profile] update FAILED id=%s [%s] %s", user_id, type(exc).__name__, msg, exc_info=True)
@@ -243,4 +257,8 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str) -> dict:
         email = None
 
     logger.info("[auth.update_profile] OK id=%s", user_id)
-    return {"user": {"id": user_id, "name": name, "email": email, "role": role, "avatar": avatar, "bio": bio}}
+    return {"user": {
+        "id": user_id, "name": name, "email": email, "role": role,
+        "avatar": avatar, "bio": bio,
+        "gender": gender, "city": city, "phone": phone,
+    }}

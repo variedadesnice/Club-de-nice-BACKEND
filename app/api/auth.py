@@ -34,4 +34,7 @@ def upload_avatar(body: AvatarUploadRequest, current_user: dict = Depends(get_cu
 
 @router.put("/profile")
 def update_profile(body: ProfileUpdateRequest, current_user: dict = Depends(get_current_user)):
-    return auth_service.update_profile(current_user["id"], body.name, body.avatar, body.bio)
+    return auth_service.update_profile(
+        current_user["id"], body.name, body.avatar, body.bio,
+        body.gender, body.city, body.phone,
+    )
