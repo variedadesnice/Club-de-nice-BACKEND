@@ -10,6 +10,16 @@ from app.core.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
+
+def _award(user_id: str, code: str, metadata: dict = None) -> None:
+    """Fire-and-forget: otorga un logro sin bloquear ni lanzar excepciones."""
+    try:
+        from app.services.levels import process_achievement
+        process_achievement(user_id, code, metadata)
+    except Exception as exc:
+        logger.warning("[posts._award] silenced error user_id=%s code=%s [%s]", user_id, code, exc)
+
+
 _MIME_TO_EXT = {
     "image/jpeg": "jpg",
     "image/jpg": "jpg",
@@ -201,6 +211,7 @@ def create_post(content: str, user_id: str, tag_ids: List[str], image_data: Opti
         full_post = post
 
     full_post.update({"likes": full_post.get("likes", 0), "comments": full_post.get("comments", 0), "userReaction": None, "reactions": {}})
+    _award(user_id, "post_created")
     return full_post
 
 
@@ -313,6 +324,9 @@ def react_to_post(post_id: str, user_id: str, reaction_type: str) -> dict:
     """
     logger.info("[posts.react_to_post] post_id=%s userId=%s reaction=%s", post_id, user_id, reaction_type)
     supabase = get_supabase()
+    _is_new_reaction = False
+    _post_owner_id = None
+
     try:
         existing = (
             supabase.table("post_reactions")
@@ -323,6 +337,13 @@ def react_to_post(post_id: str, user_id: str, reaction_type: str) -> dict:
         if not existing_data:
             supabase.table("post_reactions").insert({"post_id": post_id, "user_id": user_id, "reaction_type": reaction_type}).execute()
             user_reaction = reaction_type
+            _is_new_reaction = True
+            try:
+                owner = supabase.table("posts").select("user_id").eq("id", post_id).limit(1).execute()
+                if owner.data:
+                    _post_owner_id = owner.data[0]["user_id"]
+            except Exception:
+                pass
         elif existing_data[0]["reaction_type"] == reaction_type:
             supabase.table("post_reactions").delete().eq("post_id", post_id).eq("user_id", user_id).execute()
             user_reaction = None
@@ -335,6 +356,11 @@ def react_to_post(post_id: str, user_id: str, reaction_type: str) -> dict:
         msg = supabase_error(exc)
         logger.error("[posts.react_to_post] FAILED post_id=%s userId=%s [%s] %s", post_id, user_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al reaccionar: {msg}")
+
+    if _is_new_reaction:
+        _award(user_id, "post_liked")
+        if _post_owner_id and _post_owner_id != user_id:
+            _award(_post_owner_id, "post_received_like")
 
     counts: dict = {}
     for r in (all_resp.data or []):
@@ -413,6 +439,7 @@ def create_comment(post_id: str, user_id: str, content: str, parent_id: Optional
         "reactions": {}, "userReaction": None, "replies": [],
     })
     logger.info("[posts.create_comment] OK comment_id=%s", comment.get("id"))
+    _award(user_id, "comment_created")
     return comment
 
 

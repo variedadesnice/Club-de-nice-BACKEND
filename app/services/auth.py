@@ -9,6 +9,15 @@ from app.core.supabase import create_anon_client, get_supabase
 logger = logging.getLogger(__name__)
 
 
+def _award(user_id: str, code: str, metadata: dict = None) -> None:
+    """Fire-and-forget: otorga un logro sin bloquear ni lanzar excepciones."""
+    try:
+        from app.services.levels import process_achievement
+        process_achievement(user_id, code, metadata)
+    except Exception as exc:
+        logger.warning("[auth._award] silenced error user_id=%s code=%s [%s]", user_id, code, exc)
+
+
 def register(name: str, email: str, password: str, role: str = "miembro") -> dict:
     """
     Returns:
@@ -120,6 +129,7 @@ def login(email: str, password: str) -> dict:
         }).execute()
         profile = {"name": default_name, "role": "miembro", "avatar": default_avatar, "bio": "", "subscription_status": None}
 
+    _award(user.id, "first_login")
     return {
         "user": {
             "id": user.id,
@@ -211,6 +221,7 @@ def upload_avatar(user_id: str, image_data: str) -> dict:
 
     url = supabase.storage.from_("Avatars").get_public_url(path)
     logger.info("[auth.upload_avatar] OK userId=%s", user_id)
+    _award(user_id, "avatar_uploaded")
     return {"url": url}
 
 
@@ -257,6 +268,8 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str,
         email = None
 
     logger.info("[auth.update_profile] OK id=%s", user_id)
+    if all([name, avatar, bio, gender, city, phone]):
+        _award(user_id, "profile_completed")
     return {"user": {
         "id": user_id, "name": name, "email": email, "role": role,
         "avatar": avatar, "bio": bio,
