@@ -38,11 +38,6 @@ def update_course(course_id: str, body: UpdateCourseRequest, current_user: dict 
     )
 
 
-@router.delete("/{course_id}")
-def delete_course(course_id: str, current_user: dict = Depends(get_current_user)):
-    return courses_service.delete_course(course_id)
-
-
 @router.get("/{course_id}/chapters")
 def get_chapters(course_id: str):
     return courses_service.get_chapters(course_id)
@@ -56,8 +51,3 @@ def create_chapter(course_id: str, body: CreateChapterRequest, current_user: dic
 @router.put("/{course_id}/chapters/{chapter_id}")
 def update_chapter(course_id: str, chapter_id: str, body: UpdateChapterRequest, current_user: dict = Depends(get_current_user)):
     return courses_service.update_chapter(course_id, chapter_id, body.title, body.videoUrl, body.duration)
-
-
-@router.delete("/{course_id}/chapters/{chapter_id}")
-def delete_chapter(course_id: str, chapter_id: str, current_user: dict = Depends(get_current_user)):
-    return courses_service.delete_chapter(course_id, chapter_id)
