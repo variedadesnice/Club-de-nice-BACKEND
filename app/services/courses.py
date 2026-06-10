@@ -219,6 +219,30 @@ def update_course(course_id: str, title: Optional[str], description: Optional[st
     return _map_course(resp.data)
 
 
+def delete_course(course_id: str) -> dict:
+    """
+    Raises:
+        HTTPException 404
+        HTTPException 500
+    """
+    logger.info("[courses.delete_course] course_id=%s", course_id)
+    supabase = get_supabase()
+
+    try:
+        resp = supabase.table("courses").delete().eq("id", course_id).execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Curso no encontrado")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[courses.delete_course] delete FAILED course_id=%s [%s] %s", course_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error al eliminar curso: {msg}")
+
+    logger.info("[courses.delete_course] OK course_id=%s", course_id)
+    return {"success": True}
+
+
 def get_chapters(course_id: str) -> list:
     """
     Raises:
@@ -311,3 +335,28 @@ def update_chapter(course_id: str, chapter_id: str, title: Optional[str], video_
 
     logger.info("[courses.update_chapter] OK chapter_id=%s", chapter_id)
     return _map_chapter(resp.data)
+
+
+def delete_chapter(course_id: str, chapter_id: str) -> dict:
+    """
+    Raises:
+        HTTPException 404/500
+    """
+    logger.info("[courses.delete_chapter] course_id=%s chapter_id=%s", course_id, chapter_id)
+    supabase = get_supabase()
+
+    try:
+        resp = supabase.table("course_chapters").delete().eq("id", chapter_id).execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Capítulo no encontrado")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[courses.delete_chapter] delete FAILED chapter_id=%s [%s] %s", chapter_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error al eliminar capítulo: {msg}")
+
+    _sync_module_label(supabase, course_id)
+
+    logger.info("[courses.delete_chapter] OK chapter_id=%s", chapter_id)
+    return {"success": True}
