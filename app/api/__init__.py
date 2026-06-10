@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.achievements import router as achievements_router
 from app.api.admin_gamification import admin_achievements_router, admin_levels_router
+from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.courses import router as courses_router
 from app.api.invitations import router as invitations_router
@@ -21,3 +22,4 @@ api_router.include_router(levels_router, prefix="/levels", tags=["levels"])
 api_router.include_router(achievements_router, prefix="/achievements", tags=["achievements"])
 api_router.include_router(admin_levels_router, prefix="/admin/levels", tags=["admin-levels"])
 api_router.include_router(admin_achievements_router, prefix="/admin/achievements", tags=["admin-achievements"])
+api_router.include_router(analytics_router, prefix="/admin/analytics", tags=["admin-analytics"])
