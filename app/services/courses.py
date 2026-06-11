@@ -111,24 +111,23 @@ def create_course(title: str, description: str, thumbnail: str, user_id: Optiona
     if user_id:
         course_data["created_by"] = user_id
 
-    try:
-        resp = supabase.table("courses").insert(course_data).execute()
-        course = resp.data[0]
-    except Exception as exc:
-        msg = supabase_error(exc)
-        if user_id and "created_by" in msg:
-            logger.warning("[courses.create_course] created_by column missing, retrying without it")
-            course_data.pop("created_by", None)
-            try:
-                resp = supabase.table("courses").insert(course_data).execute()
-                course = resp.data[0]
-            except Exception as exc2:
-                msg2 = supabase_error(exc2)
-                logger.error("[courses.create_course] retry FAILED [%s] %s", type(exc2).__name__, msg2, exc_info=True)
-                raise HTTPException(status_code=500, detail=f"Error al crear curso: {msg2}")
-        else:
+    for _ in range(len(course_data)):
+        try:
+            resp = supabase.table("courses").insert(course_data).execute()
+            course = resp.data[0]
+            break
+        except Exception as exc:
+            msg = supabase_error(exc)
+            match = re.search(r"'([^']+)' column", msg)
+            missing_col = match.group(1) if match else None
+            if missing_col and missing_col in course_data:
+                logger.warning("[courses.create_course] %s column missing, retrying without it", missing_col)
+                course_data.pop(missing_col, None)
+                continue
             logger.error("[courses.create_course] insert FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
             raise HTTPException(status_code=500, detail=f"Error al crear curso: {msg}")
+    else:
+        raise HTTPException(status_code=500, detail="Error al crear curso: no se pudo determinar el esquema de 'courses'")
 
     logger.info("[courses.create_course] OK course_id=%s", course.get("id"))
     return _map_course(course)
