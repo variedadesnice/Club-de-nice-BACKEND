@@ -10,7 +10,6 @@ from app.api.levels import router as levels_router
 from app.api.payments import router as payments_router
 from app.api.posts import router as posts_router
 from app.api.tags import router as tags_router
-from app.api.lives import router as lives_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
@@ -24,4 +23,3 @@ api_router.include_router(achievements_router, prefix="/achievements", tags=["ac
 api_router.include_router(admin_levels_router, prefix="/admin/levels", tags=["admin-levels"])
 api_router.include_router(admin_achievements_router, prefix="/admin/achievements", tags=["admin-achievements"])
 api_router.include_router(analytics_router, prefix="/admin/analytics", tags=["admin-analytics"])
-api_router.include_router(lives_router, prefix="/lives", tags=["lives"])
