@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import date, timedelta
 from typing import Optional
 
@@ -12,15 +13,43 @@ logger = logging.getLogger(__name__)
 _HISTORY_DEFAULT_DAYS = 30
 _MAX_HISTORY_LIMIT = 365
 
+_QUERY_MAX_RETRIES = 2
+_QUERY_RETRY_DELAY_SECONDS = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Helpers privados
 # ---------------------------------------------------------------------------
 
+def _execute_with_retry(query, context: str):
+    """
+    Ejecuta una query reintentando ante errores transitorios de red/socket
+    (p.ej. "[Errno 11] Resource temporarily unavailable"), comunes en las
+    consultas de analytics por la cantidad de vistas agregadas que se piden.
+    """
+    last_exc: Exception = RuntimeError("unreachable")
+    for attempt in range(1, _QUERY_MAX_RETRIES + 2):
+        try:
+            return query.execute()
+        except Exception as exc:
+            last_exc = exc
+            if attempt <= _QUERY_MAX_RETRIES:
+                logger.warning(
+                    "[analytics.%s] attempt %d/%d FAILED [%s] %s - retrying",
+                    context, attempt, _QUERY_MAX_RETRIES + 1, type(exc).__name__, str(exc),
+                )
+                time.sleep(_QUERY_RETRY_DELAY_SECONDS)
+
+    raise last_exc
+
+
 def _select_single_row(supabase, view_name: str) -> dict:
     """Lee la única fila de una vista de stats. Devuelve {} si la vista está vacía."""
     try:
-        result = supabase.table(view_name).select("*").limit(1).execute()
+        result = _execute_with_retry(
+            supabase.table(view_name).select("*").limit(1),
+            context=f"_select_single_row[{view_name}]",
+        )
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[analytics._select_single_row] FAILED view=%s [%s] %s", view_name, type(exc).__name__, msg, exc_info=True)
@@ -32,11 +61,12 @@ def _select_single_row(supabase, view_name: str) -> dict:
 
 def _select_all_rows(supabase, view_name: str, order_column: Optional[str] = None) -> list:
     """Lee todas las filas de una vista de stats. Devuelve [] si está vacía."""
+    query = supabase.table(view_name).select("*")
+    if order_column:
+        query = query.order(order_column, desc=True)
+
     try:
-        query = supabase.table(view_name).select("*")
-        if order_column:
-            query = query.order(order_column, desc=True)
-        result = query.execute()
+        result = _execute_with_retry(query, context=f"_select_all_rows[{view_name}]")
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[analytics._select_all_rows] FAILED view=%s [%s] %s", view_name, type(exc).__name__, msg, exc_info=True)
@@ -207,14 +237,14 @@ def get_history(from_date: Optional[date], to_date: Optional[date], limit: int) 
     supabase = get_supabase()
 
     try:
-        result = (
+        result = _execute_with_retry(
             supabase.table("analytics_daily_snapshots")
             .select("*")
             .gte("snapshot_date", from_date.isoformat())
             .lte("snapshot_date", to_date.isoformat())
             .order("snapshot_date", desc=True)
-            .limit(limit)
-            .execute()
+            .limit(limit),
+            context="get_history",
         )
     except Exception as exc:
         msg = supabase_error(exc)
