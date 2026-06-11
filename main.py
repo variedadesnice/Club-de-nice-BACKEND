@@ -15,6 +15,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api import api_router
 from app.core.config import get_settings
+from app.core.redis_client import get_redis
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,7 +71,11 @@ app.include_router(api_router, prefix="/api")
 @app.get("/")
 def health():
     settings = get_settings()
-    return {"status": "ok", "supabase": settings.is_supabase_configured()}
+    return {
+        "status": "ok",
+        "supabase": settings.is_supabase_configured(),
+        "redis": get_redis() is not None,
+    }
 
 
 if __name__ == "__main__":
