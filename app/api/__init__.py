@@ -11,6 +11,8 @@ from app.api.courses import router as courses_router
 from app.api.invitations import router as invitations_router
 from app.api.levels import router as levels_router
 from app.api.lives import router as lives_router
+from app.api.payment_methods import router as payment_methods_router
+from app.api.admin_payment_methods import router as admin_payment_methods_router
 from app.api.payments import router as payments_router
 from app.api.posts import router as posts_router
 from app.api.tags import router as tags_router
@@ -22,6 +24,8 @@ api_router.include_router(courses_router, prefix="/courses", tags=["courses"])
 api_router.include_router(tags_router, prefix="/tags", tags=["tags"])
 api_router.include_router(invitations_router, prefix="/invitations", tags=["invitations"])
 api_router.include_router(payments_router, prefix="/payments", tags=["payments"])
+api_router.include_router(payment_methods_router, prefix="/payment-methods", tags=["payment-methods"])
+api_router.include_router(admin_payment_methods_router, prefix="/admin/payment-methods", tags=["admin-payment-methods"])
 api_router.include_router(levels_router, prefix="/levels", tags=["levels"])
 api_router.include_router(achievements_router, prefix="/achievements", tags=["achievements"])
 api_router.include_router(admin_levels_router, prefix="/admin/levels", tags=["admin-levels"])

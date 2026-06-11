@@ -17,7 +17,7 @@ class RegisterWithPaymentRequest(BaseModel):
     password: str = Field(..., min_length=6, description="Mínimo 6 caracteres")
     plan: PlanType
     amount: float = Field(..., gt=0)
-    payment_method: str = Field(..., min_length=1)
+    payment_method_id: str = Field(..., min_length=1)
     reference_number: str = Field(..., min_length=1)
     phone: str = Field(..., min_length=1)
     receipt_path: str = Field(..., min_length=1, description="Path devuelto por /payments/upload-receipt")

@@ -77,7 +77,7 @@ def _cleanup_failed_registration(supabase, user_id: str) -> None:
 
 def register_with_payment(
     name: str, email: str, password: str, plan: str, amount: float,
-    payment_method: str, reference_number: str, phone: str, receipt_path: str,
+    payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
 ) -> dict:
     """
     Crea el usuario en Supabase Auth + perfil (role='miembro', subscription_status='inactive')
@@ -86,11 +86,29 @@ def register_with_payment(
     Returns:
         {"user": {...}, "payment": {...}}
     Raises:
-        HTTPException 400 — email ya registrado u otro error de Supabase Auth
+        HTTPException 400 — email ya registrado, método de pago inválido/inactivo u otro error de Supabase Auth
         HTTPException 500 — fallo creando el perfil o el registro de pago (revierte lo creado)
     """
     logger.info("[payments.register] start - email=%s plan=%s", email, plan)
     supabase = get_supabase()
+
+    # 0. Validar que el método de pago exista y esté activo
+    try:
+        method_resp = (
+            supabase.table("payment_methods")
+            .select("id, name, is_active")
+            .eq("id", payment_method_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[payments.register] step 0/3 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    method = method_resp.data
+    if not method or not method.get("is_active"):
+        raise HTTPException(status_code=400, detail="El método de pago seleccionado no está disponible.")
 
     # 1. Crear usuario en Supabase Auth
     try:
@@ -138,7 +156,8 @@ def register_with_payment(
                 "plan": plan,
                 "amount": amount,
                 "status": "pending",
-                "payment_method": payment_method,
+                "payment_method_id": payment_method_id,
+                "payment_method": method["name"],
                 "reference_number": reference_number,
                 "receipt_url": receipt_path,
                 "phone": phone,
