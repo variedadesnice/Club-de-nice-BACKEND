@@ -47,7 +47,7 @@ def register(name: str, email: str, password: str, role: str = "miembro") -> dic
         raise HTTPException(status_code=400, detail=f"Error al crear usuario en Supabase: {msg}")
 
     user_id = auth_resp.user.id
-    avatar = f"https://i.pravatar.cc/150?u={user_id}"
+    avatar = ""  # Sin imagen — el frontend muestra la inicial del nombre
     logger.info("[auth.register] step 1/3 OK - user_id=%s", user_id)
 
     # 2. Insertar fila en profiles
@@ -121,13 +121,12 @@ def login(email: str, password: str) -> dict:
 
     if not profile:
         default_name = email.split("@")[0]
-        default_avatar = f"https://i.pravatar.cc/150?u={user.id}"
         logger.info("[auth.login] no profile found, upserting default for user_id=%s", user.id)
         supabase.table("profiles").upsert({
             "id": user.id, "name": default_name, "role": "miembro",
-            "avatar": default_avatar, "bio": "",
+            "avatar": "", "bio": "",
         }).execute()
-        profile = {"name": default_name, "role": "miembro", "avatar": default_avatar, "bio": "", "subscription_status": None}
+        profile = {"name": default_name, "role": "miembro", "avatar": "", "bio": "", "subscription_status": None}
 
     _award(user.id, "first_login")
     return {

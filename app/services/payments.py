@@ -126,7 +126,7 @@ def register_with_payment(
         raise HTTPException(status_code=400, detail=f"Error al crear usuario en Supabase: {msg}")
 
     user_id = auth_resp.user.id
-    avatar = f"https://i.pravatar.cc/150?u={user_id}"
+    avatar = ""  # Sin imagen — el frontend muestra la inicial del nombre
     logger.info("[payments.register] step 1/3 OK - user_id=%s", user_id)
 
     # 2. Insertar perfil con acceso inactivo hasta que se apruebe el pago

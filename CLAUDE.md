@@ -69,7 +69,7 @@ The service-role client has `auto_refresh_token=False` and `persist_session=Fals
 | `id` | UUID PK | Same ID as `auth.users` |
 | `name` | text | Display name |
 | `role` | text | `"miembro"` \| `"admin"` \| `"invitado"` |
-| `avatar` | text | URL (default: `pravatar.cc/150?u={id}`) |
+| `avatar` | text | URL, empty string for new users (frontend shows the first letter of the name as fallback) |
 | `bio` | text | Short bio, nullable |
 | `gender` | text | Optional personal field |
 | `city` | text | Optional personal field |
@@ -199,7 +199,7 @@ get_active_user     →  get_current_user + checks subscription_status == "activ
 
 ### Standard registration (`POST /api/auth/register`)
 1. `auth.admin.create_user(email, password, email_confirm=True)` — skips email confirmation
-2. Insert `profiles` row (name, role="miembro", avatar=pravatar, bio="", subscription_status="inactive")
+2. Insert `profiles` row (name, role="miembro", avatar="", bio="", subscription_status="inactive")
 3. Auto-login via fresh anon client → returns `{user, token}` or `{autoLogin: false}` on failure
 
 ### Payment-wizard registration (`POST /api/payments/register`)
