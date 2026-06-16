@@ -2,10 +2,14 @@ import logging
 
 from fastapi import HTTPException
 
+from app.core.cache import cache_delete, cache_get, cache_set
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
+
+_TAGS_KEY = "tags:all"
+_TAGS_TTL = 300  # 5 minutos
 
 
 def get_tags() -> list:
@@ -15,6 +19,10 @@ def get_tags() -> list:
     Raises:
         HTTPException 500 — fallo al consultar Supabase
     """
+    cached = cache_get(_TAGS_KEY)
+    if cached is not None:
+        return cached
+
     logger.info("[tags.get_tags] fetching all tags")
     supabase = get_supabase()
     try:
@@ -23,7 +31,9 @@ def get_tags() -> list:
         msg = supabase_error(exc)
         logger.error("[tags.get_tags] FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al obtener tags: {msg}")
-    return resp.data or []
+    result = resp.data or []
+    cache_set(_TAGS_KEY, result, _TAGS_TTL)
+    return result
 
 
 def create_tag(name: str) -> dict:
@@ -54,6 +64,7 @@ def create_tag(name: str) -> dict:
         logger.error("[tags.create_tag] insert FAILED name=%s [%s] %s", name, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al crear tag: {msg}")
 
+    cache_delete(_TAGS_KEY)
     logger.info("[tags.create_tag] OK id=%s", resp.data[0].get("id"))
     return resp.data[0]
 
@@ -76,5 +87,6 @@ def delete_tag(tag_id: str) -> dict:
         msg = supabase_error(exc)
         logger.error("[tags.delete_tag] FAILED tag_id=%s [%s] %s", tag_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al eliminar tag: {msg}")
+    cache_delete(_TAGS_KEY)
     logger.info("[tags.delete_tag] OK tag_id=%s", tag_id)
     return {"deleted": True}

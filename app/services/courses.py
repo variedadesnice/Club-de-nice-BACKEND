@@ -6,8 +6,16 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from app.core.cache import cache_delete, cache_get, cache_set
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase, is_supabase_configured
+
+_COURSES_KEY = "courses:all"
+_COURSES_TTL = 120  # 2 minutos
+
+
+def _chapters_key(course_id: str) -> str:
+    return f"courses:chapters:{course_id}"
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +85,10 @@ def get_courses() -> list:
     Raises:
         HTTPException 500
     """
+    cached = cache_get(_COURSES_KEY)
+    if cached is not None:
+        return cached
+
     logger.info("[courses.get_courses] fetching all courses")
     supabase = get_supabase()
     try:
@@ -85,7 +97,9 @@ def get_courses() -> list:
         msg = supabase_error(exc)
         logger.error("[courses.get_courses] FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al obtener cursos: {msg}")
-    return [_map_course(c) for c in (resp.data or [])]
+    result = [_map_course(c) for c in (resp.data or [])]
+    cache_set(_COURSES_KEY, result, _COURSES_TTL)
+    return result
 
 
 def create_course(title: str, description: str, thumbnail: str, user_id: Optional[str], category: str) -> dict:
@@ -129,6 +143,7 @@ def create_course(title: str, description: str, thumbnail: str, user_id: Optiona
     else:
         raise HTTPException(status_code=500, detail="Error al crear curso: no se pudo determinar el esquema de 'courses'")
 
+    cache_delete(_COURSES_KEY)
     logger.info("[courses.create_course] OK course_id=%s", course.get("id"))
     return _map_course(course)
 
@@ -214,6 +229,7 @@ def update_course(course_id: str, title: Optional[str], description: Optional[st
         logger.error("[courses.update_course] fetch FAILED course_id=%s [%s] %s", course_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al obtener curso actualizado: {msg}")
 
+    cache_delete(_COURSES_KEY)
     logger.info("[courses.update_course] OK course_id=%s", course_id)
     return _map_course(resp.data)
 
@@ -253,6 +269,7 @@ def delete_course(course_id: str) -> dict:
         logger.error("[courses.delete_course] course delete FAILED course_id=%s [%s] %s", course_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al eliminar curso: {msg}")
 
+    cache_delete(_COURSES_KEY, _chapters_key(course_id))
     logger.info("[courses.delete_course] OK course_id=%s", course_id)
     return {"deleted": True}
 
@@ -262,6 +279,10 @@ def get_chapters(course_id: str) -> list:
     Raises:
         HTTPException 500
     """
+    cached = cache_get(_chapters_key(course_id))
+    if cached is not None:
+        return cached
+
     logger.info("[courses.get_chapters] course_id=%s", course_id)
     supabase = get_supabase()
     try:
@@ -276,7 +297,9 @@ def get_chapters(course_id: str) -> list:
         msg = supabase_error(exc)
         logger.error("[courses.get_chapters] FAILED course_id=%s [%s] %s", course_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al obtener capítulos: {msg}")
-    return [_map_chapter(c) for c in (resp.data or [])]
+    result = [_map_chapter(c) for c in (resp.data or [])]
+    cache_set(_chapters_key(course_id), result, _COURSES_TTL)
+    return result
 
 
 def create_chapter(course_id: str, title: str, video_url: Optional[str], duration: Optional[str]) -> dict:
@@ -306,6 +329,7 @@ def create_chapter(course_id: str, title: str, video_url: Optional[str], duratio
         raise HTTPException(status_code=500, detail=f"Error al crear capítulo: {msg}")
 
     _sync_module_label(supabase, course_id)
+    cache_delete(_chapters_key(course_id), _COURSES_KEY)
     logger.info("[courses.create_chapter] OK chapter_id=%s", chapter.get("id"))
     return _map_chapter(chapter)
 
@@ -335,6 +359,7 @@ def update_chapter(course_id: str, chapter_id: str, title: Optional[str], video_
             raise HTTPException(status_code=500, detail=f"Error al actualizar capítulo: {msg}")
 
     _sync_module_label(supabase, course_id)
+    cache_delete(_chapters_key(course_id), _COURSES_KEY)
 
     try:
         resp = supabase.table("course_chapters").select("*").eq("id", chapter_id).single().execute()
