@@ -3,8 +3,15 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from app.core.cache import cache_delete
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
+
+_COURSES_CACHE_KEY = "courses:all"
+
+
+def _chapters_cache_key(course_id: str) -> str:
+    return f"courses:chapters:{course_id}"
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +529,7 @@ def admin_create_chapter(course_id: str, title: str, description: Optional[str],
         logger.error("[classroom.admin_create_chapter] insert FAILED course_id=%s [%s] %s", course_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al crear capítulo: {msg}")
 
+    cache_delete(_COURSES_CACHE_KEY, _chapters_cache_key(course_id))
     logger.info("[classroom.admin_create_chapter] OK chapter_id=%s", chapter.get("id"))
     return _map_chapter(chapter)
 
@@ -578,6 +586,7 @@ def admin_update_chapter(course_id: str, chapter_id: str, title: Optional[str], 
             raise HTTPException(status_code=404, detail="Capítulo no encontrado")
         chapter = resp.data
 
+    cache_delete(_COURSES_CACHE_KEY, _chapters_cache_key(course_id))
     logger.info("[classroom.admin_update_chapter] OK chapter_id=%s", chapter_id)
     return _map_chapter(chapter)
 
@@ -619,6 +628,7 @@ def admin_delete_chapter(course_id: str, chapter_id: str) -> dict:
         logger.error("[classroom.admin_delete_chapter] delete FAILED chapter_id=%s [%s] %s", chapter_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al eliminar capítulo: {msg}")
 
+    cache_delete(_COURSES_CACHE_KEY, _chapters_cache_key(course_id))
     logger.info("[classroom.admin_delete_chapter] OK chapter_id=%s", chapter_id)
     return {"deleted": True}
 
