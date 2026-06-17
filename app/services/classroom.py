@@ -671,9 +671,9 @@ def admin_upload_chapter_pdf(chapter_id: str, title: str, file_data: str, filena
     ext = "pdf"
     if "." in filename:
         ext = filename.split(".")[-1]
-    
-    # Bucket is chapter-pdfs, path is {chapter_id}/{filename} (with timestamp to avoid collision)
-    path = f"{chapter_id}/{int(time.time() * 1000)}_{filename}"
+    safe_ext = re.sub(r"[^a-zA-Z0-9]", "", ext) or "pdf"
+    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+    path = f"{chapter_id}/{int(time.time() * 1000)}_{safe_name}"
 
     try:
         supabase.storage.from_("chapter-pdfs").upload(
