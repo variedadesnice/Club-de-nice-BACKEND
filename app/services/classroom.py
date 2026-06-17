@@ -610,9 +610,7 @@ def admin_delete_chapter(course_id: str, chapter_id: str) -> dict:
     try:
         supabase.table("user_course_progress").delete().eq("chapter_id", chapter_id).execute()
     except Exception as exc:
-        msg = supabase_error(exc)
-        logger.error("[classroom.admin_delete_chapter] progress delete FAILED chapter_id=%s [%s] %s", chapter_id, type(exc).__name__, msg, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error al eliminar progreso del capítulo: {msg}")
+        logger.warning("[classroom.admin_delete_chapter] progress cleanup skipped chapter_id=%s [%s] %s", chapter_id, type(exc).__name__, supabase_error(exc))
 
     try:
         supabase.table("course_chapters").delete().eq("id", chapter_id).execute()
