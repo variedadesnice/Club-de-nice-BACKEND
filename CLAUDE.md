@@ -100,6 +100,7 @@ The service-role client has `auto_refresh_token=False` and `persist_session=Fals
 | `gender` | text | Optional personal field |
 | `city` | text | Optional personal field |
 | `phone` | text | Optional personal field |
+| `birthdate` | date | Optional personal field. Backs the `v_stats_ages` analytics view (age-range breakdown) — keep populated if you want that report meaningful |
 | `subscription_status` | text NOT NULL | `"inactive"` \| `"active"` \| `"expired"` |
 | `updated_at` | timestamptz | Set manually in service layer |
 
@@ -289,7 +290,8 @@ get_active_user     →  get_current_user + checks subscription_status == "activ
   "subscription_status": "inactive | active | expired",
   "gender": "string | null",
   "city": "string | null",
-  "phone": "string | null"
+  "phone": "string | null",
+  "birthdate": "string | null"
 }
 ```
 > Keep this shape in sync when adding new profile fields: update `get_me`, `login`, and `update_profile` in `app/services/auth.py` together.
@@ -332,7 +334,7 @@ Auth levels: `—` = public · `🔑` = any authenticated user · `🔓` = activ
 | POST | `/api/auth/login` | — | `{email, password}` | `{user, token}` |
 | GET | `/api/auth/me` | 🔑 | — | `{user}` |
 | POST | `/api/auth/avatar` | 🔑 | `{imageData: "data:image/...;base64,..."}` | `{url}` |
-| PUT | `/api/auth/profile` | 🔑 | `{name, avatar, bio, gender?, city?, phone?}` | `{user}` |
+| PUT | `/api/auth/profile` | 🔑 | `{name, avatar, bio, gender?, city?, phone?, birthdate?}` | `{user}` |
 
 ### Posts (`/api/posts`)
 | Method | Path | Auth | Body / Params | Returns |

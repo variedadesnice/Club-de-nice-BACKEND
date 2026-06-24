@@ -141,6 +141,7 @@ def login(email: str, password: str) -> dict:
             "gender": profile.get("gender"),
             "city": profile.get("city"),
             "phone": profile.get("phone"),
+            "birthdate": profile.get("birthdate"),
         },
         "token": token,
     }
@@ -183,6 +184,7 @@ def get_me(user_id: str, email: str) -> dict:
             "gender": profile.get("gender"),
             "city": profile.get("city"),
             "phone": profile.get("phone"),
+            "birthdate": profile.get("birthdate"),
         }
     }
 
@@ -225,7 +227,8 @@ def upload_avatar(user_id: str, image_data: str) -> dict:
 
 
 def update_profile(user_id: str, name: str, avatar: str, bio: str,
-                   gender: str | None = None, city: str | None = None, phone: str | None = None) -> dict:
+                   gender: str | None = None, city: str | None = None, phone: str | None = None,
+                   birthdate: str | None = None) -> dict:
     """
     Returns:
         {"user": {...}}
@@ -233,7 +236,10 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str,
         HTTPException 500 — fallo al actualizar en Supabase
     """
     from datetime import datetime, timezone
-    logger.info("[auth.update_profile] id=%s", user_id)
+    logger.info(
+        "[auth.update_profile] id=%s gender=%r city=%r phone=%r birthdate=%r",
+        user_id, gender, city, phone, birthdate,
+    )
     supabase = get_supabase()
 
     try:
@@ -247,7 +253,11 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str,
             update_data["city"] = city
         if phone is not None:
             update_data["phone"] = phone
-        supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        if birthdate is not None:
+            update_data["birthdate"] = birthdate
+        logger.info("[auth.update_profile] sending update_data=%r", update_data)
+        db_resp = supabase.table("profiles").update(update_data).eq("id", user_id).execute()
+        logger.info("[auth.update_profile] supabase response data=%r", db_resp.data)
     except Exception as exc:
         msg = supabase_error(exc)
         logger.error("[auth.update_profile] update FAILED id=%s [%s] %s", user_id, type(exc).__name__, msg, exc_info=True)
@@ -267,10 +277,10 @@ def update_profile(user_id: str, name: str, avatar: str, bio: str,
         email = None
 
     logger.info("[auth.update_profile] OK id=%s", user_id)
-    if all([name, avatar, bio, gender, city, phone]):
+    if all([name, avatar, bio, gender, city, phone, birthdate]):
         _award(user_id, "profile_completed")
     return {"user": {
         "id": user_id, "name": name, "email": email, "role": role,
         "avatar": avatar, "bio": bio,
-        "gender": gender, "city": city, "phone": phone,
+        "gender": gender, "city": city, "phone": phone, "birthdate": birthdate,
     }}

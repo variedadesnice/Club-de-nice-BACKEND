@@ -26,6 +26,7 @@ class ProfileUpdateRequest(BaseModel):
     gender: Optional[str] = None
     city: Optional[str] = None
     phone: Optional[str] = None
+    birthdate: Optional[str] = None
 
 
 # --- Response models ---

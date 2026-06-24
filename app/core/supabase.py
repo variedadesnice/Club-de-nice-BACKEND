@@ -3,6 +3,9 @@ from functools import lru_cache
 from supabase import Client, ClientOptions, create_client
 
 from app.core.config import get_settings
+from app.core.http_resilience import install as install_http_resilience
+
+install_http_resilience()
 
 
 @lru_cache(maxsize=1)
