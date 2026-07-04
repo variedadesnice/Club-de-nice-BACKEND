@@ -445,3 +445,68 @@ def reject_payment(payment_id: str) -> dict:
     invalidate_profile_cache(payment["user_id"])
     logger.info("[payments.reject] OK payment_id=%s", payment_id)
     return result.data[0]
+
+
+def renew_subscription(
+    user_id: str, plan: str, amount: float,
+    payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
+    currency_id: str, amount_local: float, exchange_rate: float,
+) -> dict:
+    """
+    Registra un pago de renovación de suscripción para un usuario ya existente.
+    El pago queda en estado 'pending' a la espera de la aprobación del admin.
+    """
+    logger.info("[payments.renew] start - user_id=%s plan=%s", user_id, plan)
+    supabase = get_supabase()
+
+    # 0. Validar que el método de pago exista y esté activo
+    try:
+        method_resp = (
+            supabase.table("payment_methods")
+            .select("id, name, is_active")
+            .eq("id", payment_method_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[payments.renew] step 0 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    method = method_resp.data
+    if not method or not method.get("is_active"):
+        raise HTTPException(status_code=400, detail="El método de pago seleccionado no está disponible.")
+
+    # 1. Insertar el pago en estado pendiente de revisión
+    try:
+        payment_resp = (
+            supabase.table("payments")
+            .insert({
+                "user_id": user_id,
+                "plan": plan,
+                "amount": amount,
+                "status": "pending",
+                "payment_method_id": payment_method_id,
+                "payment_method": method["name"],
+                "reference_number": reference_number,
+                "receipt_url": receipt_path,
+                "phone": phone,
+                "currency_id": currency_id,
+                "amount_local": amount_local,
+                "exchange_rate": exchange_rate,
+            })
+            .execute()
+        )
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[payments.renew] step 1 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error al registrar el pago de renovación: {msg}")
+
+    payment = payment_resp.data[0]
+    logger.info("[payments.renew] OK - user_id=%s payment_id=%s", user_id, payment["id"])
+
+    return {
+        "payment": payment,
+        "message": "Comprobante de renovación recibido. Tu pago está en revisión, te notificaremos cuando sea aprobado.",
+    }
+

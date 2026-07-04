@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 
 from app.core.deps import get_current_admin, get_current_user
 from app.core.rate_limit import rate_limiter
-from app.schemas.payments import RegisterWithPaymentRequest, UploadReceiptRequest
+from app.schemas.payments import RegisterWithPaymentRequest, UploadReceiptRequest, RenewSubscriptionRequest
 from app.services import payments as payments_service
 
 router = APIRouter()
@@ -19,6 +19,16 @@ def register_with_payment(body: RegisterWithPaymentRequest):
     """Público — registra al usuario, crea su perfil inactivo y deja el pago en revisión ('pending')."""
     return payments_service.register_with_payment(
         body.name, body.email, body.password, body.plan, body.amount,
+        body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
+        body.currency_id, body.amount_local, body.exchange_rate,
+    )
+
+
+@router.post("/renew", status_code=201, dependencies=[Depends(rate_limiter(5, 600, "payments-renew"))])
+def renew_subscription(body: RenewSubscriptionRequest, current_user: dict = Depends(get_current_user)):
+    """Autenticado — registra un pago de renovación de suscripción para el usuario actual."""
+    return payments_service.renew_subscription(
+        current_user["id"], body.plan, body.amount,
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
     )

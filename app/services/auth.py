@@ -136,6 +136,8 @@ def login(email: str, password: str) -> dict:
         }).execute()
         profile = {"name": default_name, "role": "miembro", "avatar": "", "bio": "", "subscription_status": None}
 
+    expires_at = _get_subscription_expires_at(supabase, user.id)
+
     _award(user.id, "first_login")
     return {
         "user": {
@@ -146,6 +148,7 @@ def login(email: str, password: str) -> dict:
             "avatar": profile.get("avatar"),
             "bio": profile.get("bio"),
             "subscription_status": profile.get("subscription_status"),
+            "subscription_expires_at": expires_at,
             "gender": profile.get("gender"),
             "city": profile.get("city"),
             "phone": profile.get("phone"),
@@ -155,9 +158,26 @@ def login(email: str, password: str) -> dict:
     }
 
 
+def _get_subscription_expires_at(supabase, user_id: str) -> Optional[str]:
+    try:
+        resp = (
+            supabase.table("payments")
+            .select("expires_at")
+            .eq("user_id", user_id)
+            .eq("status", "success")
+            .order("expires_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return resp.data[0].get("expires_at") if resp.data else None
+    except Exception as exc:
+        logger.warning("[_get_subscription_expires_at] failed for user_id=%s: %s", user_id, exc)
+        return None
+
+
 def get_me(user_id: str, email: str) -> dict:
     """
-    Devuelve el perfil actual del usuario autenticado (incluye subscription_status),
+    Devuelve el perfil actual del usuario autenticado (incluye subscription_status y subscription_expires_at),
     útil para refrescar el estado de cuenta sin tener que reloguearse.
 
     Returns:
@@ -180,6 +200,8 @@ def get_me(user_id: str, email: str) -> dict:
     if not profile:
         raise HTTPException(status_code=404, detail="Perfil no encontrado.")
 
+    expires_at = _get_subscription_expires_at(supabase, user_id)
+
     return {
         "user": {
             "id": user_id,
@@ -189,6 +211,7 @@ def get_me(user_id: str, email: str) -> dict:
             "avatar": profile.get("avatar"),
             "bio": profile.get("bio"),
             "subscription_status": profile.get("subscription_status"),
+            "subscription_expires_at": expires_at,
             "gender": profile.get("gender"),
             "city": profile.get("city"),
             "phone": profile.get("phone"),
