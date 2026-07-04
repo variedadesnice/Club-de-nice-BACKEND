@@ -21,6 +21,7 @@ from app.api.emails import public_router as email_public_router, admin_router as
 from app.api.raffles import router as raffles_router
 from app.api.streaks import router as streaks_router
 from app.api.tags import router as tags_router
+from app.api.users import router as users_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
@@ -46,3 +47,5 @@ api_router.include_router(streaks_router, prefix="/streaks", tags=["streaks"])
 api_router.include_router(raffles_router, prefix="/admin/raffles", tags=["admin-raffles"])
 api_router.include_router(email_public_router, prefix="/auth", tags=["email"])
 api_router.include_router(email_admin_router, prefix="/admin/emails", tags=["admin-email"])
+api_router.include_router(users_router, prefix="/users", tags=["users"])
+
