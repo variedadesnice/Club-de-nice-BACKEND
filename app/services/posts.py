@@ -191,7 +191,7 @@ def create_post(content: str, user_id: str, tag_ids: List[str], image_data: Opti
         if match:
             ext = _ext_from_mime(match.group(1))
             try:
-                image_url = _upload_image("Post", f"post-{post_id}.{ext}", image_data)
+                image_url = _upload_image("posts", f"post-{post_id}.{ext}", image_data)
                 supabase.table("posts").update({"image_url": image_url}).eq("id", post_id).execute()
             except HTTPException:
                 logger.warning("[posts.create_post] image upload failed for post_id=%s, continuing", post_id)
@@ -262,7 +262,7 @@ def patch_post(
         if match:
             ext = _ext_from_mime(match.group(1))
             try:
-                updates["image_url"] = _upload_image("Post", f"post-{post_id}.{ext}", image_data)
+                updates["image_url"] = _upload_image("posts", f"post-{post_id}.{ext}", image_data)
             except HTTPException:
                 logger.warning("[posts.patch_post] image upload failed for post_id=%s", post_id)
 

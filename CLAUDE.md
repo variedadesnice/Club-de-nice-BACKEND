@@ -229,7 +229,7 @@ Daily check-in tracked via RPC `register_daily_login()`. `GET /api/streaks/check
 | Bucket | Used for |
 |--------|----------|
 | `Avatars` | Profile pictures + course thumbnails |
-| `Post` | Post images |
+| `posts` | Post images |
 | `receipts` | Payment receipt files |
 | `chapter-pdfs` | Course chapter PDFs |
 | `live-pdfs` | Live session PDFs |

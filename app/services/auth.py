@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse

@@ -119,7 +119,7 @@ def get_public_profile(user_id: str) -> dict:
     completed_courses = 0
     try:
         courses_resp = (
-            supabase.table("user_chapter_progress")
+            supabase.table("user_course_progress")
             .select("chapter_id", count="exact")
             .eq("user_id", user_id)
             .eq("completed", True)
