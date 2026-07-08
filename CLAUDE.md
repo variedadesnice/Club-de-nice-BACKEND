@@ -62,10 +62,12 @@ app/
     raffles.py             # router: admin CRUD/draw/cron · public_router: GET /raffles/active (Comunidad banner)
     roulette.py            # router: admin CRUD/toggle/spins · public_router: GET /roulette/status, POST /roulette/spin
     emails.py              # public_router: forgot-password · admin_router: renewal-reminders cron
+    users.py               # GET /users/{user_id}/profile — public profile for the feed's profile drawer
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
     raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
     roulette.py            # Weighted random pick, once-per-day spin enforcement (server-authoritative)
+    users.py               # get_public_profile() — each stat section is independently non-fatal
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
     roulette.py            # PrizeOut (admin, has weight) vs PublicPrizeOut (member, no weight)
@@ -407,6 +409,8 @@ User clicks "Actualizar estado" in AccountStatus screen
 
 The Postgres trigger `sync_subscription_status` on `payments` handles all status transitions. Never update `subscription_status` directly — go through payment approval.
 
+**Renewal path (already-registered user whose subscription is `"expired"`)**: the frontend's `App.tsx` intercepts any authenticated `miembro` with `subscription_status === "expired"` and renders a full-page `RenewalGateway` component instead of the normal app (no way to reach the rest of the site until resolved). It's a 2-step wizard mirroring the registration payment wizard (plan → BCV amount → payment method → receipt), posting to `POST /api/payments/renew` instead of `/register`. Same "pending → admin approves/rejects → trigger flips `subscription_status`" flow as above, just skipping user/profile creation since the account already exists.
+
 ---
 
 ## All Endpoints
@@ -499,6 +503,7 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 |--------|------|------|------|---------|
 | POST | `/api/payments/upload-receipt` | — | `{reference_number, filename, fileData: "data:...;base64,..."}` | `{path}` |
 | POST | `/api/payments/register` | — | `{name, email, password, plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path}` | `{user, payment, message}` |
+| POST | `/api/payments/renew` | 🔑 | `{plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path}` | `{payment, message}` (201) — renewal payment for an already-registered user, same "pending" review flow as registration |
 | GET | `/api/payments/` | 👑 | — | `[Payment]` with user_name, ordered newest first |
 | GET | `/api/payments/{user_id}` | 🔑 | — | `[Payment]` for that user |
 | PATCH | `/api/payments/{id}/approve` | 👑 | — | Payment (sets status=success, expires_at) |
@@ -638,6 +643,13 @@ Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns
 | GET | `/api/roulette/status` | `{is_active, already_spun_today, prizes: [PublicPrizeOut]}` — prizes have **no** `weight` |
 | POST | `/api/roulette/spin` | `{prize_id, label, color}` — 400 if inactive or already spun today (UTC) |
 
+### Users (`/api/users`, 🔑)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/users/{user_id}/profile` | Public profile of any member: `{id, name, avatar, bio, city, role, level, achievements, streak, completed_courses, social_impact}` — never exposes email/phone/birthdate. Powers the profile drawer opened from clicking a username/avatar in the feed (`ProfileDrawerContext`). |
+
+Every section past the base `profiles` row (level/tier, achievements, streak, completed_courses, social_impact) is independently try/except-wrapped and non-fatal — a failure in any one of them just silently degrades that field to an empty/zero default instead of erroring the whole response. **`social_impact` is currently always 0 for this endpoint**: it queries `posts.likes`/`posts.comments` directly, but those columns only exist on `posts_view` (see the `posts`/`posts_view` note above) — the query fails, gets swallowed, and defaults to 0. Fix by switching that query to `posts_view`.
+
 ### Email (`/api/auth`, `/api/admin/emails`)
 | Method | Path | Auth | Body | Returns |
 |--------|------|------|------|---------|
@@ -734,3 +746,5 @@ Pattern: `[<module>.<function>] <context>`. Use `logger.info` for happy path, `l
 9. **Two parallel course CRUD surfaces** — `app/api/courses.py` (legacy, mounted at `/api/courses`) is still the path the frontend admin UI uses to create/edit/delete courses and chapters. `app/api/admin_classroom.py` (mounted at `/api/admin/classroom`) duplicates chapter delete and owns chapter PDF management and course publish toggling. Don't assume one supersedes the other — check which one the frontend component actually calls before changing behavior.
 
 10. **`/api/classroom` progress-tracking endpoints exist but aren't fully wired into the UI** — `complete_chapter` / `get_course_progress` / `get_completed_courses_count` are implemented and used by `Profile.tsx` for the completed-courses count and by the achievement triggers, but `CourseDetail.tsx` on the frontend still reads the static `courses.progress` column rather than calling `get_course_progress`.
+
+11. **Supabase views aren't tracked anywhere in this repo** — `v_stats_members`, `v_stats_revenue`, `v_analytics_history`, `v_stats_ages` (used by `app/services/analytics.py`) live only in the Supabase project itself, no `.sql`/migration file backs them up. `v_stats_members` in particular had a real bug fixed 2026-07-08: its `gender` filters compared against lowercase `'masculino'`/`'femenino'`, but `profiles.gender` actually stores `"Masculino"`/`"Femenino"` (capitalized, per the frontend dropdown) — every row silently fell into the `gender_other` bucket. Fixed with `lower(gender) = 'masculino'/'femenino'`. If this view is ever recreated from an old backup/script, re-check that casing.
