@@ -60,12 +60,15 @@ app/
     analytics.py           # Admin dashboard stats
     streaks.py             # Daily check-in / streak tracking
     raffles.py             # router: admin CRUD/draw/cron · public_router: GET /raffles/active (Comunidad banner)
+    roulette.py            # router: admin CRUD/toggle/spins · public_router: GET /roulette/status, POST /roulette/spin
     emails.py              # public_router: forgot-password · admin_router: renewal-reminders cron
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
     raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
+    roulette.py            # Weighted random pick, once-per-day spin enforcement (server-authoritative)
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
+    roulette.py            # PrizeOut (admin, has weight) vs PublicPrizeOut (member, no weight)
 ```
 
 **Pattern**: route handler validates input (Pydantic), calls service function, returns result. All DB logic in `services/`. Never put DB queries in `api/`.
@@ -82,12 +85,13 @@ app/
 /api/currencies  /api/admin/currencies
 /api/streaks
 /api/admin/raffles  /api/raffles
+/api/admin/roulette  /api/roulette
 /api/auth          (also hosts /forgot-password from email public_router)
 /api/admin/emails
 /api/users
 ```
 
-> `emails.py` and `raffles.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → mounted at `/api/raffles`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`). Both cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires.
+> `emails.py`, `raffles.py` and `roulette.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → `/api/raffles`; `roulette.py` → `/api/roulette`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`, `/api/admin/roulette`). Cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires. `roulette.py`'s public routes use `get_active_user` instead (no cron involved).
 
 Health endpoint: `GET /` → `{status: "ok", supabase: bool, redis: bool}`.
 
@@ -182,6 +186,15 @@ Status computed on read: `"pendiente"` / `"usada"` / `"expirada"`.
 RLS enabled on both tables. `drawn_at IS NULL` is the signal for "active/pending" — no separate boolean column. Only active `miembro` profiles (`subscription_status='active'`, `role='miembro'`) are eligible to be selected as winners. Winner selection uses `random.sample()` (no replacement) in `draw_raffle()`. FK from `raffle_winners.user_id → profiles.id` (not `auth.users`) enables PostgREST nested select.
 
 **Create vs draw are separate steps**: `create_raffle()` just inserts the announcement row (title, description, image, winner_count, draw_at) — no winners chosen yet. `draw_raffle(raffle_id)` does the actual random selection and sets `drawn_at`. It's called either manually (admin "Sortear ahora" button) or automatically by the `draw-scheduled-raffles` pg_cron job hitting `POST /api/admin/raffles/draw-scheduled/cron`, which sweeps all raffles where `draw_at <= now()` and `drawn_at IS NULL` via `draw_scheduled_raffles()`. A failure on one raffle in the sweep doesn't block the others.
+
+### `roulette_settings` / `roulette_prizes` / `roulette_spins`
+| Table | Columns |
+|-------|---------|
+| `roulette_settings` | `id`, `is_active` (bool — single row, always the first/only one), `updated_at` |
+| `roulette_prizes` | `id`, `label`, `color`, `weight` (int > 0 — relative odds, admin-only, never exposed to members), `sort_order`, `created_at` |
+| `roulette_spins` | `id`, `user_id` (FK → profiles ON DELETE CASCADE), `prize_id` (FK → roulette_prizes ON DELETE SET NULL), `prize_label` (snapshot — survives prize edits/deletes), `spun_at`, `spun_date` (generated `date` column, UTC, `unique(user_id, spun_date)`) |
+
+RLS enabled on all three, no policies (service-role only, same as every other table). Min 2 / max 12 prizes, enforced in `app/services/roulette.py` (mirrors the old client-side limits). `_pick_weighted()` selects server-side via `random.uniform(0, total_weight)` — the client never picks the winner, since it could otherwise be manipulated by inspecting the JS. The `unique(user_id, spun_date)` constraint is the real backstop against double-spins (a check-then-insert alone isn't race-safe — see the achievements TOCTOU note below); a unique-violation on insert is caught and turned into a 400 rather than a 500.
 
 ### `user_course_progress` (used by the newer `/api/classroom` student endpoints)
 Tracks per-user chapter completion. Backs `complete_chapter` / `get_course_progress` / `get_completed_courses_count`. **Not yet wired into the frontend UI** — `CourseDetail.tsx` only reads the static `courses.progress` column, not this table.
@@ -285,6 +298,8 @@ get_active_user     →  get_current_user + checks subscription_status == "activ
 | List / approve / reject payments | `get_current_admin` | — |
 | Register + upload receipt | — (public) | Used in onboarding wizard |
 | View own payments | `get_current_user` | user_id must match or admin |
+| Roulette — check status / spin | `get_active_user` | Once per day per user (`spun_date` UTC) |
+| Roulette — admin (prizes, toggle, spin history) | `get_current_admin` | — |
 
 > **Gap**: Course and tag management routes (and the legacy `/api/courses` chapter CRUD) use `get_current_user` but the admin check only happens in the frontend. Any authenticated user can technically create/edit/delete courses via the API.
 
@@ -607,6 +622,22 @@ Reads Supabase views `v_stats_members`, `v_stats_revenue`, `v_analytics_history`
 
 Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns 400 if active members < winner_count.
 
+### Roulette — admin (`/api/admin/roulette`, 👑)
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| GET | `/api/admin/roulette/` | — | `{is_active, prizes: [PrizeOut]}` — prizes include `weight` |
+| PATCH | `/api/admin/roulette/` | `{is_active}` | Same as GET — toggles the roulette on/off |
+| POST | `/api/admin/roulette/prizes` | `{label, color?, weight?}` | Prize (201); 400 if already 12 prizes |
+| PATCH | `/api/admin/roulette/prizes/{prize_id}` | `{label?, color?, weight?}` | Prize |
+| DELETE | `/api/admin/roulette/prizes/{prize_id}` | — | `{deleted: true}`; 400 if only 2 prizes remain |
+| GET | `/api/admin/roulette/spins` | `?limit=20&offset=0` | `[{id, user_id, user_name, prize_label, spun_at}]`, newest first |
+
+### Roulette — miembros (`/api/roulette`, 🔓)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/roulette/status` | `{is_active, already_spun_today, prizes: [PublicPrizeOut]}` — prizes have **no** `weight` |
+| POST | `/api/roulette/spin` | `{prize_id, label, color}` — 400 if inactive or already spun today (UTC) |
+
 ### Email (`/api/auth`, `/api/admin/emails`)
 | Method | Path | Auth | Body | Returns |
 |--------|------|------|------|---------|
@@ -645,6 +676,8 @@ The cron endpoint uses `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` (vali
 - **Only one pending raffle at a time**: `create_raffle()` rejects (400) if `_get_pending_raffle()` (`drawn_at IS NULL`) already returns one. Delete or draw the pending raffle before scheduling another.
 - **Winners stay visible in Comunidad for 24h**: `get_active_raffle()` (`_WINNERS_VISIBLE_FOR` in `app/services/raffles.py`) returns the pending raffle, or a drawn one only if `drawn_at` is within the last day — after that it returns `null` and the banner disappears even with no new raffle scheduled.
 - **Winner emails are admin-only**: `_get_email_map()` resolves `user_id → email` via one `auth.admin.list_users()` call (not N calls per winner) and is only threaded through on admin-router responses (`list_raffles`, `create_raffle`, manual `draw_raffle`) — never on the public `/api/raffles/active` used by the Comunidad banner.
+- **Roulette winner is always server-picked**: `POST /api/roulette/spin` runs `_pick_weighted()` and returns the result — the frontend only animates to whatever the server already decided, it never picks the prize itself (would otherwise be trivially manipulable from devtools). Prize `weight` is never sent to `GET /api/roulette/status`, so members can't infer the real odds.
+- **Roulette prizes are informational only**: winning does not auto-grant XP or achievements — the admin manages fulfillment manually via the spin history (`GET /api/admin/roulette/spins`), same as raffle winners.
 
 ---
 

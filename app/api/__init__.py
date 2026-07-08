@@ -19,6 +19,7 @@ from app.api.payments import router as payments_router
 from app.api.posts import router as posts_router
 from app.api.emails import public_router as email_public_router, admin_router as email_admin_router
 from app.api.raffles import router as raffles_router, public_router as raffles_public_router
+from app.api.roulette import router as roulette_router, public_router as roulette_public_router
 from app.api.streaks import router as streaks_router
 from app.api.tags import router as tags_router
 from app.api.users import router as users_router
@@ -46,6 +47,8 @@ api_router.include_router(admin_currencies_router, prefix="/admin/currencies", t
 api_router.include_router(streaks_router, prefix="/streaks", tags=["streaks"])
 api_router.include_router(raffles_router, prefix="/admin/raffles", tags=["admin-raffles"])
 api_router.include_router(raffles_public_router, prefix="/raffles", tags=["raffles"])
+api_router.include_router(roulette_router, prefix="/admin/roulette", tags=["admin-roulette"])
+api_router.include_router(roulette_public_router, prefix="/roulette", tags=["roulette"])
 api_router.include_router(email_public_router, prefix="/auth", tags=["email"])
 api_router.include_router(email_admin_router, prefix="/admin/emails", tags=["admin-email"])
 api_router.include_router(users_router, prefix="/users", tags=["users"])
