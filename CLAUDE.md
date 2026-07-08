@@ -602,7 +602,7 @@ Reads Supabase views `v_stats_members`, `v_stats_revenue`, `v_analytics_history`
 ### Raffles — miembros (`/api/raffles`, 🔓)
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/raffles/active` | `RaffleOut \| null` — the soonest pending raffle (`drawn_at IS NULL`), or `null` if none. Powers the "sorteo activo" banner in Comunidad. |
+| GET | `/api/raffles/active` | `RaffleOut \| null` — the most recent raffle: pending (shows countdown) or drawn within the last 24h (shows winners, no email). `null` once neither applies. Powers the "sorteo activo" banner in Comunidad. |
 
 Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns 400 if active members < winner_count.
 
@@ -640,7 +640,10 @@ The cron endpoint uses `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` (vali
 - **Emails are fire-and-forget**: `send_welcome` and `send_payment_approved` run in daemon threads — a failed email never rolls back the main operation. `dispatch_renewal_reminders` is synchronous since it's called from a dedicated endpoint.
 - **Renewal reminders fire once per cycle**: queries use exact date equality (`expires_at::date = today+N`) not ranges, so each reminder sends exactly once. Running the cron more than once per day on the same date is safe.
 - **Raffle eligibility is point-in-time**: winner selection queries active members at *draw* time (not creation time, since those are now separate steps) — no caching. Minimum 1 winner and enough eligible members required.
-- **Raffle draw is automatic but overridable**: `draw-scheduled-raffles` (pg_cron, every 10 min) draws any raffle past its `draw_at`. Admins can also force an early draw via `POST /api/admin/raffles/{id}/draw`. Either way, `drawn_at` is what flips a raffle from "active" (shown in the Comunidad banner) to "finished".
+- **Raffle draw is automatic but overridable**: `draw-scheduled-raffles` (pg_cron, every 10 min) draws any raffle past its `draw_at`. Admins can also force an early draw via `POST /api/admin/raffles/{id}/draw`. Either way, `drawn_at` is what flips a raffle from "pending" to "drawn".
+- **Only one pending raffle at a time**: `create_raffle()` rejects (400) if `_get_pending_raffle()` (`drawn_at IS NULL`) already returns one. Delete or draw the pending raffle before scheduling another.
+- **Winners stay visible in Comunidad for 24h**: `get_active_raffle()` (`_WINNERS_VISIBLE_FOR` in `app/services/raffles.py`) returns the pending raffle, or a drawn one only if `drawn_at` is within the last day — after that it returns `null` and the banner disappears even with no new raffle scheduled.
+- **Winner emails are admin-only**: `_get_email_map()` resolves `user_id → email` via one `auth.admin.list_users()` call (not N calls per winner) and is only threaded through on admin-router responses (`list_raffles`, `create_raffle`, manual `draw_raffle`) — never on the public `/api/raffles/active` used by the Comunidad banner.
 
 ---
 

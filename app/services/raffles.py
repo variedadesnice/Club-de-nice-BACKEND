@@ -2,7 +2,7 @@ import base64
 import logging
 import random
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -234,11 +234,15 @@ def _get_pending_raffle() -> dict | None:
     return _map_raffle(rows[0])
 
 
+_WINNERS_VISIBLE_FOR = timedelta(days=1)
+
+
 def get_active_raffle() -> dict | None:
     """
     El sorteo "actual" para la Comunidad: el más reciente, pendiente o ya sorteado.
     Mientras está pendiente se muestra la cuenta regresiva; una vez sorteado, los
-    ganadores. No incluye email (dato privado, solo para admin).
+    ganadores por _WINNERS_VISIBLE_FOR (luego el banner deja de mostrarse aunque
+    no haya un sorteo nuevo programado). No incluye email (dato privado, solo admin).
     """
     supabase = get_supabase()
     try:
@@ -257,7 +261,15 @@ def get_active_raffle() -> dict | None:
     rows = resp.data or []
     if not rows:
         return None
-    return _map_raffle(rows[0])
+
+    raffle = rows[0]
+    drawn_at = raffle.get("drawn_at")
+    if drawn_at is not None:
+        drawn_dt = datetime.fromisoformat(drawn_at.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) - drawn_dt > _WINNERS_VISIBLE_FOR:
+            return None
+
+    return _map_raffle(raffle)
 
 
 def get_raffle(raffle_id: str, include_email: bool = False) -> dict:
