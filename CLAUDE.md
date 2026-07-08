@@ -63,11 +63,13 @@ app/
     roulette.py            # router: admin CRUD/toggle/spins · public_router: GET /roulette/status, POST /roulette/spin
     emails.py              # public_router: forgot-password · admin_router: renewal-reminders cron
     users.py               # GET /users/{user_id}/profile — public profile for the feed's profile drawer
+    promo_banners.py       # router: admin CRUD/activate · public_router: GET /promo-banners/active (Comunidad ad banner)
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
     raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
     roulette.py            # Weighted random pick, once-per-day spin enforcement (server-authoritative)
     users.py               # get_public_profile() — each stat section is independently non-fatal
+    promo_banners.py       # set_active() mirrors lives.py's exclusive-activation pattern — only one banner active at a time
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
     roulette.py            # PrizeOut (admin, has weight) vs PublicPrizeOut (member, no weight)
@@ -88,12 +90,13 @@ app/
 /api/streaks
 /api/admin/raffles  /api/raffles
 /api/admin/roulette  /api/roulette
+/api/admin/promo-banners  /api/promo-banners
 /api/auth          (also hosts /forgot-password from email public_router)
 /api/admin/emails
 /api/users
 ```
 
-> `emails.py`, `raffles.py` and `roulette.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → `/api/raffles`; `roulette.py` → `/api/roulette`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`, `/api/admin/roulette`). Cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires. `roulette.py`'s public routes use `get_active_user` instead (no cron involved).
+> `emails.py`, `raffles.py`, `roulette.py` and `promo_banners.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → `/api/raffles`; `roulette.py` → `/api/roulette`; `promo_banners.py` → `/api/promo-banners`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`, `/api/admin/roulette`, `/api/admin/promo-banners`). Cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires. `roulette.py`'s and `promo_banners.py`'s public routes use `get_active_user` instead (no cron involved).
 
 Health endpoint: `GET /` → `{status: "ok", supabase: bool, redis: bool}`.
 
@@ -198,6 +201,11 @@ RLS enabled on both tables. `drawn_at IS NULL` is the signal for "active/pending
 
 RLS enabled on all three, no policies (service-role only, same as every other table). Min 2 / max 12 prizes, enforced in `app/services/roulette.py` (mirrors the old client-side limits). `_pick_weighted()` selects server-side via `random.uniform(0, total_weight)` — the client never picks the winner, since it could otherwise be manipulated by inspecting the JS. The `unique(user_id, spun_date)` constraint is the real backstop against double-spins (a check-then-insert alone isn't race-safe — see the achievements TOCTOU note below); a unique-violation on insert is caught and turned into a 400 rather than a 500.
 
+### `promo_banners`
+`id`, `title`, `description`, `image_url`, `link_url` (all required — every banner must have a destination link), `is_active` (bool), `created_by` (FK → profiles, set null on delete), `created_at`. RLS enabled, no policies (service-role only). Bucket `promo-banners`.
+
+**Exclusive activation**: `set_active(banner_id, is_active)` in `app/services/promo_banners.py` mirrors the Lives pattern — activating one banner deactivates any other currently-active one first, so only one ad banner shows in Comunidad at a time. `GET /api/promo-banners/active` returns that single active banner (or `null`) for the feed banner; no time-based expiry, it stays until an admin deactivates it or activates a different one.
+
 ### `user_course_progress` (used by the newer `/api/classroom` student endpoints)
 Tracks per-user chapter completion. Backs `complete_chapter` / `get_course_progress` / `get_completed_courses_count`. **Not yet wired into the frontend UI** — `CourseDetail.tsx` only reads the static `courses.progress` column, not this table.
 
@@ -254,6 +262,7 @@ Daily check-in tracked via RPC `register_daily_login()`. `GET /api/streaks/check
 | `level-tier-icons` | Gamification level tier icons |
 | `achievement-icons` | Achievement icons |
 | `raffle-images` | Raffle banner images |
+| `promo-banners` | Advertising banner images (Comunidad) |
 
 ---
 
@@ -302,6 +311,8 @@ get_active_user     →  get_current_user + checks subscription_status == "activ
 | View own payments | `get_current_user` | user_id must match or admin |
 | Roulette — check status / spin | `get_active_user` | Once per day per user (`spun_date` UTC) |
 | Roulette — admin (prizes, toggle, spin history) | `get_current_admin` | — |
+| Promo banners — read active | `get_active_user` | — |
+| Promo banners — admin (CRUD, activate) | `get_current_admin` | — |
 
 > **Gap**: Course and tag management routes (and the legacy `/api/courses` chapter CRUD) use `get_current_user` but the admin check only happens in the frontend. Any authenticated user can technically create/edit/delete courses via the API.
 
@@ -643,6 +654,21 @@ Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns
 | GET | `/api/roulette/status` | `{is_active, already_spun_today, prizes: [PublicPrizeOut]}` — prizes have **no** `weight` |
 | POST | `/api/roulette/spin` | `{prize_id, label, color}` — 400 if inactive or already spun today (UTC) |
 
+### Promo Banners — admin (`/api/admin/promo-banners`, 👑)
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| GET | `/api/admin/promo-banners/` | — | `[PromoBannerOut]`, newest first |
+| POST | `/api/admin/promo-banners/image` | `{imageData}` | `{url}` (201, bucket `promo-banners`) |
+| POST | `/api/admin/promo-banners/` | `{title, description, image_url, link_url}` (all required) | Banner (201), created inactive |
+| PATCH | `/api/admin/promo-banners/{banner_id}` | `{title?, description?, image_url?, link_url?}` | Banner |
+| PATCH | `/api/admin/promo-banners/{banner_id}/active` | `{is_active}` | Banner — activating deactivates any other active banner first |
+| DELETE | `/api/admin/promo-banners/{banner_id}` | — | `{deleted: true}` |
+
+### Promo Banners — miembros (`/api/promo-banners`, 🔓)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/promo-banners/active` | `PromoBannerOut \| null` — the single active banner, if any. Powers the ad banner in Comunidad. |
+
 ### Users (`/api/users`, 🔑)
 | Method | Path | Returns |
 |--------|------|---------|
@@ -690,6 +716,7 @@ The cron endpoint uses `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` (vali
 - **Winner emails are admin-only**: `_get_email_map()` resolves `user_id → email` via one `auth.admin.list_users()` call (not N calls per winner) and is only threaded through on admin-router responses (`list_raffles`, `create_raffle`, manual `draw_raffle`) — never on the public `/api/raffles/active` used by the Comunidad banner.
 - **Roulette winner is always server-picked**: `POST /api/roulette/spin` runs `_pick_weighted()` and returns the result — the frontend only animates to whatever the server already decided, it never picks the prize itself (would otherwise be trivially manipulable from devtools). Prize `weight` is never sent to `GET /api/roulette/status`, so members can't infer the real odds.
 - **Roulette prizes are informational only**: winning does not auto-grant XP or achievements — the admin manages fulfillment manually via the spin history (`GET /api/admin/roulette/spins`), same as raffle winners.
+- **Only one promo banner active at a time**: same exclusive-activation pattern as Lives — `set_active()` flips any other active banner off before activating the requested one. `link_url` is mandatory on every banner (not optional), so the Comunidad banner is always clickable.
 
 ---
 
