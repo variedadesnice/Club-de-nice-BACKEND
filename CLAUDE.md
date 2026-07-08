@@ -59,11 +59,11 @@ app/
     payment_methods.py, admin_payment_methods.py
     analytics.py           # Admin dashboard stats
     streaks.py             # Daily check-in / streak tracking
-    raffles.py             # Admin sorteos (random winner selection among active members)
+    raffles.py             # router: admin CRUD/draw/cron · public_router: GET /raffles/active (Comunidad banner)
     emails.py              # public_router: forgot-password · admin_router: renewal-reminders cron
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
-    raffles.py             # Raffle creation, listing, deletion
+    raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
 ```
@@ -81,12 +81,13 @@ app/
 /api/lives  /api/admin/lives
 /api/currencies  /api/admin/currencies
 /api/streaks
-/api/admin/raffles
+/api/admin/raffles  /api/raffles
 /api/auth          (also hosts /forgot-password from email public_router)
 /api/admin/emails
+/api/users
 ```
 
-> `emails.py` exports two routers: `public_router` (mounted at `/api/auth`) and `admin_router` (mounted at `/api/admin/emails`). The cron endpoint `/renewal-reminders/cron` uses `_require_service_role` instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` which never expires.
+> `emails.py` and `raffles.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → mounted at `/api/raffles`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`). Both cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires.
 
 Health endpoint: `GET /` → `{status: "ok", supabase: bool, redis: bool}`.
 
