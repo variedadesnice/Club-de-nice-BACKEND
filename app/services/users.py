@@ -88,9 +88,9 @@ def get_public_profile(user_id: str) -> dict:
     try:
         ach_resp = (
             supabase.table("user_achievements")
-            .select("earned_at, achievement:achievement_id(code, name, description, icon_url, xp_reward)")
+            .select("id, earned_at:obtained_at, achievement:achievement_types(code, name, description, icon_url, xp_reward)")
             .eq("user_id", user_id)
-            .order("earned_at", desc=True)
+            .order("obtained_at", desc=True)
             .execute()
         )
         achievements = ach_resp.data or []

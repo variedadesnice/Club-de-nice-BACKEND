@@ -175,10 +175,12 @@ Status computed on read: `"pendiente"` / `"usada"` / `"expirada"`.
 ### `raffles` / `raffle_winners`
 | Table | Columns |
 |-------|---------|
-| `raffles` | `id`, `title`, `winner_count` (int), `created_by` (FK → profiles, set null on delete), `created_at` |
+| `raffles` | `id`, `title`, `description`, `image_url`, `winner_count` (int), `draw_at` (timestamptz — scheduled draw date), `drawn_at` (timestamptz, NULL = pending/active), `created_by` (FK → profiles, set null on delete), `created_at` |
 | `raffle_winners` | `id`, `raffle_id` (FK → raffles ON DELETE CASCADE), `user_id` (FK → profiles ON DELETE CASCADE), `position` (int), `created_at` |
 
-RLS enabled on both tables. Only active `miembro` profiles (`subscription_status='active'`, `role='miembro'`) are eligible to be selected as winners. Winner selection uses `random.sample()` (no replacement). If winner insert fails after raffle insert, the raffle row is rolled back manually. FK from `raffle_winners.user_id → profiles.id` (not `auth.users`) enables PostgREST nested select.
+RLS enabled on both tables. `drawn_at IS NULL` is the signal for "active/pending" — no separate boolean column. Only active `miembro` profiles (`subscription_status='active'`, `role='miembro'`) are eligible to be selected as winners. Winner selection uses `random.sample()` (no replacement) in `draw_raffle()`. FK from `raffle_winners.user_id → profiles.id` (not `auth.users`) enables PostgREST nested select.
+
+**Create vs draw are separate steps**: `create_raffle()` just inserts the announcement row (title, description, image, winner_count, draw_at) — no winners chosen yet. `draw_raffle(raffle_id)` does the actual random selection and sets `drawn_at`. It's called either manually (admin "Sortear ahora" button) or automatically by the `draw-scheduled-raffles` pg_cron job hitting `POST /api/admin/raffles/draw-scheduled/cron`, which sweeps all raffles where `draw_at <= now()` and `drawn_at IS NULL` via `draw_scheduled_raffles()`. A failure on one raffle in the sweep doesn't block the others.
 
 ### `user_course_progress` (used by the newer `/api/classroom` student endpoints)
 Tracks per-user chapter completion. Backs `complete_chapter` / `get_course_progress` / `get_completed_courses_count`. **Not yet wired into the frontend UI** — `CourseDetail.tsx` only reads the static `courses.progress` column, not this table.
@@ -235,6 +237,7 @@ Daily check-in tracked via RPC `register_daily_login()`. `GET /api/streaks/check
 | `live-pdfs` | Live session PDFs |
 | `level-tier-icons` | Gamification level tier icons |
 | `achievement-icons` | Achievement icons |
+| `raffle-images` | Raffle banner images |
 
 ---
 
@@ -309,15 +312,16 @@ Uses **Resend** (`resend` PyPI package). Degrades gracefully if `RESEND_API_KEY`
 
 ## pg_cron Jobs (Supabase)
 
-Three scheduled jobs configured in Supabase via `pg_cron` + `pg_net`:
+Four scheduled jobs configured in Supabase via `pg_cron` + `pg_net`:
 
 | Job name | Schedule (UTC) | What it does |
 |----------|---------------|--------------|
 | `expire-subscriptions-daily` | 3:00 AM | Marks expired active subscriptions |
 | `daily-analytics-snapshot` | 3:30 AM | Generates today's analytics snapshot |
 | `daily-renewal-reminders` | 9:00 AM | Calls `POST /api/admin/emails/renewal-reminders/cron` |
+| `draw-scheduled-raffles` | Every 10 min | Calls `POST /api/admin/raffles/draw-scheduled/cron` — draws any raffle whose `draw_at` has passed |
 
-The `daily-renewal-reminders` job reads `backend_url` and `service_role_key` from the `app_secrets` table at runtime and POSTs to the cron endpoint with `Authorization: Bearer <service_role_key>`. To activate after deploying the backend:
+Both cron-triggered endpoints read `backend_url` and `service_role_key` from the `app_secrets` table at runtime and POST with `Authorization: Bearer <service_role_key>` (validated by `app/core/deps.py::require_service_role`, shared by both). To activate after deploying the backend:
 ```sql
 UPDATE app_secrets SET value = 'https://tu-backend.com' WHERE key = 'backend_url';
 UPDATE app_secrets SET value = '<service_role_key>' WHERE key = 'service_role_key';
@@ -589,8 +593,16 @@ Reads Supabase views `v_stats_members`, `v_stats_revenue`, `v_analytics_history`
 | Method | Path | Body | Returns |
 |--------|------|------|---------|
 | GET | `/api/admin/raffles/` | — | `[RaffleOut]` with winners, newest first |
-| POST | `/api/admin/raffles/` | `{title, winner_count: 1–20}` | `RaffleOut` (201) — selects random winners from active miembros |
+| POST | `/api/admin/raffles/image` | `{imageData}` | `{url}` (201, bucket `raffle-images`) |
+| POST | `/api/admin/raffles/` | `{title, description?, image_url?, winner_count: 1–20, draw_at}` | `RaffleOut` (201) — schedules the raffle, does **not** pick winners yet |
+| POST | `/api/admin/raffles/{raffle_id}/draw` | — | `RaffleOut` — draws winners now (manual early trigger); 400 if already drawn |
+| POST | `/api/admin/raffles/draw-scheduled/cron` | service_role_key | `{drawn: [...], errors: [...]}` — for pg_cron, draws all raffles past their `draw_at` |
 | DELETE | `/api/admin/raffles/{raffle_id}` | — | `{deleted: true}` (cascades to raffle_winners) |
+
+### Raffles — miembros (`/api/raffles`, 🔓)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/raffles/active` | `RaffleOut \| null` — the soonest pending raffle (`drawn_at IS NULL`), or `null` if none. Powers the "sorteo activo" banner in Comunidad. |
 
 Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns 400 if active members < winner_count.
 
@@ -627,7 +639,8 @@ The cron endpoint uses `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` (vali
 - **Frozen exchange rate**: `payments.exchange_rate` and `amount_local` are snapshots taken at registration time — never recalculate retroactively even if the BCV rate changes later.
 - **Emails are fire-and-forget**: `send_welcome` and `send_payment_approved` run in daemon threads — a failed email never rolls back the main operation. `dispatch_renewal_reminders` is synchronous since it's called from a dedicated endpoint.
 - **Renewal reminders fire once per cycle**: queries use exact date equality (`expires_at::date = today+N`) not ranges, so each reminder sends exactly once. Running the cron more than once per day on the same date is safe.
-- **Raffle eligibility is point-in-time**: winner selection queries active members at creation time — no caching. Minimum 2 prizes required on the frontend roulette; minimum 1 winner and enough eligible members required on the backend raffle.
+- **Raffle eligibility is point-in-time**: winner selection queries active members at *draw* time (not creation time, since those are now separate steps) — no caching. Minimum 1 winner and enough eligible members required.
+- **Raffle draw is automatic but overridable**: `draw-scheduled-raffles` (pg_cron, every 10 min) draws any raffle past its `draw_at`. Admins can also force an early draw via `POST /api/admin/raffles/{id}/draw`. Either way, `drawn_at` is what flips a raffle from "active" (shown in the Comunidad banner) to "finished".
 
 ---
 

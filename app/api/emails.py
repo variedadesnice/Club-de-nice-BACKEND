@@ -1,10 +1,9 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Security
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, EmailStr
 
-from app.core.deps import get_current_admin
+from app.core.deps import get_current_admin, require_service_role
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
 from app.core.config import get_settings
@@ -17,19 +16,6 @@ public_router = APIRouter()
 admin_router = APIRouter()
 
 logger = logging.getLogger(__name__)
-
-_bearer = HTTPBearer()
-
-
-def _require_service_role(credentials: HTTPAuthorizationCredentials = Security(_bearer)):
-    """
-    Dependency para endpoints internos llamados por cron.
-    Acepta el service_role_key de Supabase como Bearer token —
-    nunca expira, sin necesidad de JWT de usuario.
-    """
-    s = get_settings()
-    if credentials.credentials != s.supabase_service_role_key:
-        raise HTTPException(status_code=403, detail="Acceso no autorizado.")
 
 
 # ─── Password reset (público) ────────────────────────────────────────────────
@@ -106,7 +92,7 @@ def send_renewal_reminders(_: dict = Depends(get_current_admin)):
 
 
 @admin_router.post("/renewal-reminders/cron")
-def renewal_reminders_cron(_: None = Depends(_require_service_role)):
+def renewal_reminders_cron(_: None = Depends(require_service_role)):
     """
     Endpoint para pg_cron — autenticado con el service_role_key de Supabase
     (nunca expira). No usa JWT de usuario.

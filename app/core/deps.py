@@ -2,9 +2,11 @@ import hashlib
 import logging
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.cache import cache_delete, cache_get, cache_set
+from app.core.config import get_settings
 from app.core.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,20 @@ async def get_active_user(current_user: dict = Depends(get_current_user)) -> dic
         raise HTTPException(status_code=403, detail="Tu suscripción no está activa. Actualiza tu plan para continuar.")
 
     return current_user
+
+
+_bearer = HTTPBearer()
+
+
+def require_service_role(credentials: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+    """
+    Dependency para endpoints internos llamados por pg_cron.
+    Acepta el service_role_key de Supabase como Bearer token — nunca expira,
+    sin necesidad de JWT de usuario.
+    """
+    s = get_settings()
+    if credentials.credentials != s.supabase_service_role_key:
+        raise HTTPException(status_code=403, detail="Acceso no autorizado.")
 
 
 async def get_optional_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:
