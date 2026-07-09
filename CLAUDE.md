@@ -64,11 +64,13 @@ app/
     emails.py              # public_router: forgot-password · admin_router: renewal-reminders cron
     users.py               # GET /users/{user_id}/profile — public profile for the feed's profile drawer
     promo_banners.py       # router: admin CRUD/activate · public_router: GET /promo-banners/active (Comunidad ad banner)
+    profile.py             # GET /profile/me/summary — aggregates the own-profile endpoints into one request
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
     raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
     roulette.py            # Weighted random pick, once-per-day spin enforcement (server-authoritative)
     users.py               # get_public_profile() — each stat section is independently non-fatal
+    profile.py             # get_my_summary() — thin composition layer, reuses levels/streaks/classroom/posts services as-is
     promo_banners.py       # set_active() mirrors lives.py's exclusive-activation pattern — only one banner active at a time
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
@@ -94,6 +96,7 @@ app/
 /api/auth          (also hosts /forgot-password from email public_router)
 /api/admin/emails
 /api/users
+/api/profile
 ```
 
 > `emails.py`, `raffles.py`, `roulette.py` and `promo_banners.py` each export two routers following the same split: a `public_router`/member-facing one (`emails.py` → mounted at `/api/auth`; `raffles.py` → `/api/raffles`; `roulette.py` → `/api/roulette`; `promo_banners.py` → `/api/promo-banners`) and an admin one (`/api/admin/emails`, `/api/admin/raffles`, `/api/admin/roulette`, `/api/admin/promo-banners`). Cron endpoints (`/renewal-reminders/cron`, `/admin/raffles/draw-scheduled/cron`) use the shared `app/core/deps.py::require_service_role` dependency instead of `get_current_admin` — it validates `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>`, which never expires. `roulette.py`'s and `promo_banners.py`'s public routes use `get_active_user` instead (no cron involved).
@@ -675,6 +678,13 @@ Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns
 | GET | `/api/users/{user_id}/profile` | Public profile of any member: `{id, name, avatar, bio, city, role, level, achievements, streak, completed_courses, social_impact}` — never exposes email/phone/birthdate. Powers the profile drawer opened from clicking a username/avatar in the feed (`ProfileDrawerContext`). |
 
 Every section past the base `profiles` row (level/tier, achievements, streak, completed_courses, social_impact) is independently try/except-wrapped and non-fatal — a failure in any one of them just silently degrades that field to an empty/zero default instead of erroring the whole response. **`social_impact` is currently always 0 for this endpoint**: it queries `posts.likes`/`posts.comments` directly, but those columns only exist on `posts_view` (see the `posts`/`posts_view` note above) — the query fails, gets swallowed, and defaults to 0. Fix by switching that query to `posts_view`.
+
+### Profile (`/api/profile`, 🔑)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/profile/me/summary` | `{level, achievements, streak, completedCourses, socialImpact}` — the current user's own profile data, aggregated. |
+
+`app/services/profile.py::get_my_summary()` is a thin aggregator: it calls the exact same service functions the 5 standalone endpoints use (`levels.get_user_level`, `levels.get_my_achievements`, `streaks.checkin`, `classroom.get_completed_courses_count`, `posts.get_social_impact`) and bundles the results into one response, each wrapped in its own try/except (same non-fatal pattern as `users.get_public_profile`). `Profile.tsx` calls this single endpoint instead of firing 5 separate requests on mount. The individual endpoints (`/api/levels/me`, `/api/levels/me/achievements`, `/api/streaks/checkin`, `/api/classroom/me/completed-courses`, `/api/posts/me/social-impact`) still exist unchanged for any other caller — nothing was removed or refactored, this just adds a composition layer on top. Note it calls `streaks.checkin()` (not the read-only `get_my_streak()`), so hitting this endpoint still registers today's login exactly like the old `/api/streaks/checkin` call did.
 
 ### Email (`/api/auth`, `/api/admin/emails`)
 | Method | Path | Auth | Body | Returns |

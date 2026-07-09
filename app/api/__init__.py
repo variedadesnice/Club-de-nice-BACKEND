@@ -17,6 +17,7 @@ from app.api.payment_methods import router as payment_methods_router
 from app.api.admin_payment_methods import router as admin_payment_methods_router
 from app.api.payments import router as payments_router
 from app.api.posts import router as posts_router
+from app.api.profile import router as profile_router
 from app.api.promo_banners import router as promo_banners_router, public_router as promo_banners_public_router
 from app.api.emails import public_router as email_public_router, admin_router as email_admin_router
 from app.api.raffles import router as raffles_router, public_router as raffles_public_router
@@ -55,4 +56,5 @@ api_router.include_router(promo_banners_public_router, prefix="/promo-banners", 
 api_router.include_router(email_public_router, prefix="/auth", tags=["email"])
 api_router.include_router(email_admin_router, prefix="/admin/emails", tags=["admin-email"])
 api_router.include_router(users_router, prefix="/users", tags=["users"])
+api_router.include_router(profile_router, prefix="/profile", tags=["profile"])
 
