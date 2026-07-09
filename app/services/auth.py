@@ -159,6 +159,42 @@ def login(email: str, password: str) -> dict:
     }
 
 
+def reset_password(access_token: str, new_password: str) -> dict:
+    """
+    Completa el flujo de recuperación de contraseña: valida el access_token que
+    Supabase emite al verificar el enlace de recuperación (mismo mecanismo que
+    get_current_user, pero aquí el usuario aún no tiene sesión propia) y
+    actualiza la contraseña con el cliente service-role.
+
+    Returns: {"message": "..."}
+    Raises:
+        HTTPException 400 — access_token inválido o expirado
+        HTTPException 500 — fallo al actualizar la contraseña
+    """
+    logger.info("[auth.reset_password] start")
+    supabase = get_supabase()
+
+    try:
+        user_resp = supabase.auth.get_user(access_token)
+        user = user_resp.user if user_resp else None
+    except Exception as exc:
+        logger.warning("[auth.reset_password] token validation FAILED [%s] %s", type(exc).__name__, str(exc))
+        user = None
+
+    if not user:
+        raise HTTPException(status_code=400, detail="El enlace de recuperación no es válido o ya expiró. Solicita uno nuevo.")
+
+    try:
+        supabase.auth.admin.update_user_by_id(user.id, {"password": new_password})
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[auth.reset_password] update FAILED user_id=%s [%s] %s", user.id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    logger.info("[auth.reset_password] OK user_id=%s", user.id)
+    return {"message": "Tu contraseña fue actualizada correctamente. Ya puedes iniciar sesión."}
+
+
 def _get_subscription_expires_at(supabase, user_id: str) -> Optional[str]:
     try:
         resp = (

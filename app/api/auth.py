@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.deps import get_current_user
 from app.core.rate_limit import rate_limiter
-from app.schemas.auth import AvatarUploadRequest, LoginRequest, ProfileUpdateRequest, RegisterRequest
+from app.schemas.auth import AvatarUploadRequest, LoginRequest, ProfileUpdateRequest, RegisterRequest, ResetPasswordRequest
 from app.services import auth as auth_service
 
 router = APIRouter()
@@ -20,6 +20,12 @@ def register(body: RegisterRequest):
 @router.post("/login", dependencies=[Depends(rate_limiter(10, 60, "login"))])
 def login(body: LoginRequest):
     return auth_service.login(body.email, body.password)
+
+
+@router.post("/reset-password", dependencies=[Depends(rate_limiter(5, 600, "reset-password"))])
+def reset_password(body: ResetPasswordRequest):
+    """Público — completa la recuperación de contraseña usando el access_token del enlace de recuperación."""
+    return auth_service.reset_password(body.access_token, body.new_password)
 
 
 @router.get("/me")

@@ -15,6 +15,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ResetPasswordRequest(BaseModel):
+    access_token: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6, description="Mínimo 6 caracteres")
+
+
 class AvatarUploadRequest(BaseModel):
     imageData: str
 
