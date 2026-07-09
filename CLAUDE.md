@@ -338,7 +338,9 @@ Uses **Resend** (`resend` PyPI package). Degrades gracefully if `RESEND_API_KEY`
 
 **Renewal reminder logic**: `dispatch_renewal_reminders()` queries `payments` for `status='success'` records where `expires_at::date` equals `today+5`, `today+1`, or `today` (exactly, not a range) — so each reminder fires exactly once per payment cycle. Called daily by pg_cron at 9:00 AM UTC.
 
-**Password reset flow**: `POST /api/auth/forgot-password` calls `supabase.auth.admin.generate_link({type: "recovery", email, options: {redirect_to: APP_URL+"/reset-password"}})` to get `properties.action_link`, then sends it via Resend. Always returns 200 to avoid revealing whether email exists.
+**Password reset flow**: `POST /api/auth/forgot-password` calls `supabase.auth.admin.generate_link({type: "recovery", email, options: {redirect_to: APP_URL+"/reset-password"}})` to get `properties.action_link`, then sends it via Resend. Always returns 200 to avoid revealing whether email exists. Clicking the emailed link hits Supabase's own `/auth/v1/verify` endpoint, which verifies the token and 302-redirects to `redirect_to` with the session in the URL **fragment** (`#access_token=...&type=recovery&...`) — implicit-flow style, since admin-generated links have no PKCE `code_verifier` to exchange. The frontend's `ResetPassword.tsx` reads that fragment client-side (never sent to any server as part of routing) and posts `{access_token, new_password}` to `POST /api/auth/reset-password`, which validates the token the same way `get_current_user` validates any JWT (`supabase.auth.get_user(token)`) and then calls `auth.admin.update_user_by_id(user.id, {"password": new_password})`.
+
+> ⚠️ **Supabase Auth → URL Configuration must allowlist the production redirect URL.** Verified 2026-07-08 by generating a real recovery link: passing `redirect_to=https://elclubdenice.com/reset-password` silently downgraded to whatever the project's default `http://localhost:3000` Site URL is (path dropped too) — Supabase only honors `redirect_to` values that match an allowed pattern; anything else falls back to the default Site URL. Until `https://elclubdenice.com/reset-password` (or a `https://elclubdenice.com/**` wildcard) is added under Authentication → URL Configuration → Redirect URLs in the Supabase dashboard, real users clicking the emailed reset link in production will land on `localhost`, not the live site.
 
 ---
 
@@ -436,6 +438,7 @@ Auth levels: `—` = public · `🔑` = any authenticated user · `🔓` = activ
 |--------|------|------|---------------|---------|
 | POST | `/api/auth/register` | — | `{name, email, password, role?}` | `{user, token}` or `{autoLogin: false}` |
 | POST | `/api/auth/login` | — | `{email, password}` | `{user, token}` |
+| POST | `/api/auth/reset-password` | — | `{access_token, new_password}` | `{message}` — completes the recovery flow, see below |
 | GET | `/api/auth/me` | 🔑 | — | `{user}` |
 | POST | `/api/auth/avatar` | 🔑 | `{imageData: "data:image/...;base64,..."}` | `{url}` |
 | PUT | `/api/auth/profile` | 🔑 | `{name, avatar, bio, gender?, city?, phone?, birthdate?}` | `{user}` |
