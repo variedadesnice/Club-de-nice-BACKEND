@@ -93,6 +93,8 @@ def _verify_payment_automatically(
     receipt_path: str,
     banco_origen: Optional[str],
     cedula_pagador: Optional[str],
+    telefono_pagador: Optional[str] = None,
+    payment_date: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Llama a la API externa de verificación de Pago Móvil.
@@ -129,17 +131,18 @@ def _verify_payment_automatically(
         foto_comprobante = f"data:{mime_type};base64,{base64.b64encode(file_bytes).decode('utf-8')}"
 
         # 3. Normalizar teléfono al formato venezolano (04XXXXXXXXX)
-        telefono_pagador = _normalize_phone_for_verification(phone)
+        target_phone = telefono_pagador if telefono_pagador else phone
+        telefono_pagador_normalized = _normalize_phone_for_verification(target_phone)
 
         # 4. Armar payload exacto que pide la API
         payload = {
             "metodo_pago": "pagomovil",
             "numero_referencia": reference_number,
             "banco_origen": banco_origen,
-            "telefono_pagador": telefono_pagador,
+            "telefono_pagador": telefono_pagador_normalized,
             "cedula_pagador": cedula_pagador,
             "monto": float(amount_local),
-            "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "fecha": payment_date if payment_date else datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "foto_comprobante": foto_comprobante,
         }
 
@@ -181,6 +184,7 @@ def register_with_payment(
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
     banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
+    telefono_pagador: Optional[str] = None, payment_date: Optional[str] = None,
 ) -> dict:
     """
     Crea el usuario en Supabase Auth + perfil (role='miembro', subscription_status='inactive')
@@ -250,33 +254,44 @@ def register_with_payment(
 
     logger.info("[payments.register] step 2/3 OK")
 
-    # 3. Insertar el pago en estado pendiente de revisión
+    # 3. Insertar el pago en estado pendiente de revisión (con fallback defensivo por si faltan columnas en la DB)
+    insert_data = {
+        "user_id": user_id,
+        "plan": plan,
+        "amount": amount,
+        "status": "pending",
+        "payment_method_id": payment_method_id,
+        "payment_method": method["name"],
+        "reference_number": reference_number,
+        "receipt_url": receipt_path,
+        "phone": phone,
+        "currency_id": currency_id,
+        "amount_local": amount_local,
+        "exchange_rate": exchange_rate,
+        "banco_origen": banco_origen,
+        "cedula_pagador": cedula_pagador,
+        "telefono_pagador": telefono_pagador,
+        "payment_date": payment_date,
+    }
     try:
-        payment_resp = (
-            supabase.table("payments")
-            .insert({
-                "user_id": user_id,
-                "plan": plan,
-                "amount": amount,
-                "status": "pending",
-                "payment_method_id": payment_method_id,
-                "payment_method": method["name"],
-                "reference_number": reference_number,
-                "receipt_url": receipt_path,
-                "phone": phone,
-                "currency_id": currency_id,
-                "amount_local": amount_local,
-                "exchange_rate": exchange_rate,
-                "banco_origen": banco_origen,
-                "cedula_pagador": cedula_pagador,
-            })
-            .execute()
-        )
+        payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        logger.error("[payments.register] step 3/3 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
-        _cleanup_failed_registration(supabase, user_id)
-        raise HTTPException(status_code=500, detail=f"Error al registrar el pago: {msg}")
+        if "telefono_pagador" in msg or "payment_date" in msg:
+            logger.warning("[payments.register] Faltan columnas en DB. Reintentando sin telefono_pagador/payment_date. Error: %s", msg)
+            insert_data.pop("telefono_pagador", None)
+            insert_data.pop("payment_date", None)
+            try:
+                payment_resp = supabase.table("payments").insert(insert_data).execute()
+            except Exception as retry_exc:
+                msg_retry = supabase_error(retry_exc)
+                logger.error("[payments.register] Reintento de inserción falló: %s", msg_retry)
+                _cleanup_failed_registration(supabase, user_id)
+                raise HTTPException(status_code=500, detail=f"Error al registrar el pago: {msg_retry}")
+        else:
+            logger.error("[payments.register] step 3/3 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
+            _cleanup_failed_registration(supabase, user_id)
+            raise HTTPException(status_code=500, detail=f"Error al registrar el pago: {msg}")
 
     payment = payment_resp.data[0]
     logger.info("[payments.register] OK - user_id=%s payment_id=%s", user_id, payment["id"])
@@ -284,7 +299,8 @@ def register_with_payment(
     # Intentar la verificación automática del pago
     approved_payment = _verify_payment_automatically(
         payment["id"], method.get("auto_verify", False), reference_number, phone,
-        amount_local, receipt_path, banco_origen, cedula_pagador
+        amount_local, receipt_path, banco_origen, cedula_pagador,
+        telefono_pagador, payment_date
     )
 
     if approved_payment:
@@ -574,6 +590,7 @@ def renew_subscription(
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
     banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
+    telefono_pagador: Optional[str] = None, payment_date: Optional[str] = None,
 ) -> dict:
     """
     Registra un pago de renovación de suscripción para un usuario ya existente.
@@ -600,32 +617,42 @@ def renew_subscription(
     if not method or not method.get("is_active"):
         raise HTTPException(status_code=400, detail="El método de pago seleccionado no está disponible.")
 
-    # 1. Insertar el pago en estado pendiente de revisión
+    # 1. Insertar el pago en estado pendiente de revisión (con fallback defensivo por si faltan columnas en la DB)
+    insert_data = {
+        "user_id": user_id,
+        "plan": plan,
+        "amount": amount,
+        "status": "pending",
+        "payment_method_id": payment_method_id,
+        "payment_method": method["name"],
+        "reference_number": reference_number,
+        "receipt_url": receipt_path,
+        "phone": phone,
+        "currency_id": currency_id,
+        "amount_local": amount_local,
+        "exchange_rate": exchange_rate,
+        "banco_origen": banco_origen,
+        "cedula_pagador": cedula_pagador,
+        "telefono_pagador": telefono_pagador,
+        "payment_date": payment_date,
+    }
     try:
-        payment_resp = (
-            supabase.table("payments")
-            .insert({
-                "user_id": user_id,
-                "plan": plan,
-                "amount": amount,
-                "status": "pending",
-                "payment_method_id": payment_method_id,
-                "payment_method": method["name"],
-                "reference_number": reference_number,
-                "receipt_url": receipt_path,
-                "phone": phone,
-                "currency_id": currency_id,
-                "amount_local": amount_local,
-                "exchange_rate": exchange_rate,
-                "banco_origen": banco_origen,
-                "cedula_pagador": cedula_pagador,
-            })
-            .execute()
-        )
+        payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        logger.error("[payments.renew] step 1 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error al registrar el pago de renovación: {msg}")
+        if "telefono_pagador" in msg or "payment_date" in msg:
+            logger.warning("[payments.renew] Faltan columnas en DB. Reintentando sin telefono_pagador/payment_date. Error: %s", msg)
+            insert_data.pop("telefono_pagador", None)
+            insert_data.pop("payment_date", None)
+            try:
+                payment_resp = supabase.table("payments").insert(insert_data).execute()
+            except Exception as retry_exc:
+                msg_retry = supabase_error(retry_exc)
+                logger.error("[payments.renew] Reintento de renovación falló: %s", msg_retry)
+                raise HTTPException(status_code=500, detail=f"Error al registrar el pago de renovación: {msg_retry}")
+        else:
+            logger.error("[payments.renew] step 1 FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error al registrar el pago de renovación: {msg}")
 
     payment = payment_resp.data[0]
     logger.info("[payments.renew] OK - user_id=%s payment_id=%s", user_id, payment["id"])
@@ -633,7 +660,8 @@ def renew_subscription(
     # Intentar la verificación automática del pago
     approved_payment = _verify_payment_automatically(
         payment["id"], method.get("auto_verify", False), reference_number, phone,
-        amount_local, receipt_path, banco_origen, cedula_pagador
+        amount_local, receipt_path, banco_origen, cedula_pagador,
+        telefono_pagador, payment_date
     )
 
     if approved_payment:

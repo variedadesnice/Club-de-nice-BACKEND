@@ -26,6 +26,8 @@ class RegisterWithPaymentRequest(BaseModel):
     exchange_rate: float = Field(..., gt=0, description="Tasa congelada en el momento del pago (1 USD = X local)")
     banco_origen: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
     cedula_pagador: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
+    telefono_pagador: Optional[str] = Field(None, description="Teléfono del pagador (ej. 04246296646)")
+    payment_date: Optional[str] = Field(None, description="Fecha del pago (ej. 2026-06-06)")
 
 
 class RenewSubscriptionRequest(BaseModel):
@@ -40,4 +42,7 @@ class RenewSubscriptionRequest(BaseModel):
     exchange_rate: float = Field(..., gt=0, description="Tasa congelada en el momento del pago (1 USD = X local)")
     banco_origen: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
     cedula_pagador: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
+    telefono_pagador: Optional[str] = Field(None, description="Teléfono del pagador (ej. 04246296646)")
+    payment_date: Optional[str] = Field(None, description="Fecha del pago (ej. 2026-06-06)")
+
 

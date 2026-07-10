@@ -21,7 +21,7 @@ def register_with_payment(body: RegisterWithPaymentRequest):
         body.name, body.email, body.password, body.plan, body.amount,
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
-        body.banco_origen, body.cedula_pagador,
+        body.banco_origen, body.cedula_pagador, body.telefono_pagador, body.payment_date,
     )
 
 
@@ -32,7 +32,7 @@ def renew_subscription(body: RenewSubscriptionRequest, current_user: dict = Depe
         current_user["id"], body.plan, body.amount,
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
-        body.banco_origen, body.cedula_pagador,
+        body.banco_origen, body.cedula_pagador, body.telefono_pagador, body.payment_date,
     )
 
 
