@@ -1,11 +1,13 @@
 import base64
 import logging
+import mimetypes
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import HTTPException
 
+from app.core.config import get_settings
 from app.core.deps import invalidate_profile_cache
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
@@ -71,6 +73,107 @@ def _cleanup_failed_registration(supabase, user_id: str) -> None:
         logger.warning("[payments._cleanup] auth user cleanup failed user_id=%s [%s] %s", user_id, type(exc).__name__, supabase_error(exc))
 
 
+def _normalize_phone_for_verification(phone: str) -> str:
+    nums = "".join(c for c in phone if c.isdigit())
+    if nums.startswith("58") and len(nums) == 12:
+        return "0" + nums[2:]
+    if nums.startswith("0") and len(nums) == 11:
+        return nums
+    if len(nums) == 10 and not nums.startswith("0"):
+        return "0" + nums
+    return nums
+
+
+def _verify_payment_automatically(
+    payment_id: str,
+    payment_method_name: str,
+    reference_number: str,
+    phone: str,
+    amount_local: float,
+    receipt_path: str,
+    banco_origen: Optional[str],
+    cedula_pagador: Optional[str],
+) -> Optional[dict]:
+    """
+    Intenta verificar el pago a través de la API externa configurada en
+    Settings.payment_verification_url. Si es exitoso, aprueba el pago inmediatamente.
+    Retorna el registro de pago aprobado o None si no se auto-aprobó.
+    """
+    settings = get_settings()
+    if not settings.payment_verification_url:
+        logger.info("[_verify_payment_automatically] No payment_verification_url configured, skipping.")
+        return None
+
+    is_pago_movil = "movil" in payment_method_name.lower() or "móvil" in payment_method_name.lower()
+    if not is_pago_movil or not banco_origen or not cedula_pagador:
+        logger.info(
+            "[_verify_payment_automatically] Skipping auto-verification: method=%s, banco_origen=%s, cedula_pagador=%s",
+            payment_method_name, banco_origen, cedula_pagador
+        )
+        return None
+
+    logger.info("[_verify_payment_automatically] Triggering for payment_id=%s reference=%s", payment_id, reference_number)
+    
+    try:
+        # 1. Download file from Supabase storage
+        supabase = get_supabase()
+        file_bytes = supabase.storage.from_(_RECEIPT_BUCKET).download(receipt_path)
+        
+        # 2. Base64 encode
+        import base64
+        mime_type, _ = mimetypes.guess_type(receipt_path)
+        if not mime_type:
+            mime_type = "image/jpeg"
+        base64_img = base64.b64encode(file_bytes).decode("utf-8")
+        foto_comprobante = f"data:{mime_type};base64,{base64_img}"
+        
+        # 3. Clean phone
+        telefono_pagador = _normalize_phone_for_verification(phone)
+        
+        # 4. Prepare payload
+        payload = {
+            "metodo_pago": "pagomovil",
+            "numero_referencia": reference_number,
+            "banco_origen": banco_origen,
+            "telefono_pagador": telefono_pagador,
+            "cedula_pagador": cedula_pagador,
+            "monto": float(amount_local),
+            "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "foto_comprobante": foto_comprobante
+        }
+        
+        # Simulation / Mock mode for development if using the placeholder URL
+        if "api.tu-marca.com" in url:
+            logger.info("[_verify_payment_automatically] [MOCK MODE] Simulating successful verification for testing placeholder URL.")
+            approved_payment = approve_payment(payment_id)
+            return approved_payment
+
+        # 5. Call API
+        import httpx
+        url = settings.payment_verification_url
+        
+        logger.info("[_verify_payment_automatically] Sending request to %s", url)
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.post(url, json=payload)
+            logger.info("[_verify_payment_automatically] Response status: %d", resp.status_code)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success" and data.get("pago") is True:
+                    logger.info("[_verify_payment_automatically] API verified payment successfully! Approving payment %s", payment_id)
+                    approved_payment = approve_payment(payment_id)
+                    return approved_payment
+                else:
+                    logger.info("[_verify_payment_automatically] Payment NOT verified by API. Response: %s", data)
+            else:
+                logger.warning("[_verify_payment_automatically] API returned non-200 status: %d, Response: %s", resp.status_code, resp.text)
+                
+    except Exception as exc:
+        logger.exception("[_verify_payment_automatically] Error during automatic payment verification: %s", exc)
+        
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Registro con pago
 # ---------------------------------------------------------------------------
@@ -79,10 +182,11 @@ def register_with_payment(
     name: str, email: str, password: str, plan: str, amount: float,
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
+    banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
 ) -> dict:
     """
     Crea el usuario en Supabase Auth + perfil (role='miembro', subscription_status='inactive')
-    + registro de pago en estado 'pending', a la espera de revisión por un admin.
+    + registro de pago en estado 'pending' (y opcionalmente intenta la verificación automática).
 
     Returns:
         {"user": {...}, "payment": {...}}
@@ -165,6 +269,8 @@ def register_with_payment(
                 "currency_id": currency_id,
                 "amount_local": amount_local,
                 "exchange_rate": exchange_rate,
+                "banco_origen": banco_origen,
+                "cedula_pagador": cedula_pagador,
             })
             .execute()
         )
@@ -176,6 +282,24 @@ def register_with_payment(
 
     payment = payment_resp.data[0]
     logger.info("[payments.register] OK - user_id=%s payment_id=%s", user_id, payment["id"])
+
+    # Intentar la verificación automática del pago
+    approved_payment = _verify_payment_automatically(
+        payment["id"], method["name"], reference_number, phone,
+        amount_local, receipt_path, banco_origen, cedula_pagador
+    )
+
+    if approved_payment:
+        # Si se aprobó de forma automática, el estado de suscripción del perfil ya es 'active'
+        # gracias al trigger de Supabase, pero lo devolvemos explícitamente al cliente
+        return {
+            "user": {
+                "id": user_id, "name": name, "email": email, "role": "miembro",
+                "avatar": avatar, "bio": "", "subscription_status": "active",
+            },
+            "payment": approved_payment,
+            "message": "¡Pago verificado automáticamente! Tu cuenta ha sido activada de inmediato.",
+        }
 
     return {
         "user": {
@@ -451,10 +575,11 @@ def renew_subscription(
     user_id: str, plan: str, amount: float,
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
+    banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
 ) -> dict:
     """
     Registra un pago de renovación de suscripción para un usuario ya existente.
-    El pago queda en estado 'pending' a la espera de la aprobación del admin.
+    El pago queda en estado 'pending' (y opcionalmente intenta la verificación automática).
     """
     logger.info("[payments.renew] start - user_id=%s plan=%s", user_id, plan)
     supabase = get_supabase()
@@ -494,6 +619,8 @@ def renew_subscription(
                 "currency_id": currency_id,
                 "amount_local": amount_local,
                 "exchange_rate": exchange_rate,
+                "banco_origen": banco_origen,
+                "cedula_pagador": cedula_pagador,
             })
             .execute()
         )
@@ -504,6 +631,41 @@ def renew_subscription(
 
     payment = payment_resp.data[0]
     logger.info("[payments.renew] OK - user_id=%s payment_id=%s", user_id, payment["id"])
+
+    # Intentar la verificación automática del pago
+    approved_payment = _verify_payment_automatically(
+        payment["id"], method["name"], reference_number, phone,
+        amount_local, receipt_path, banco_origen, cedula_pagador
+    )
+
+    if approved_payment:
+        # Obtener el perfil actualizado para devolverlo al cliente y actualizar su estado inmediatamente
+        try:
+            profile_resp = supabase.table("profiles").select("*").eq("id", user_id).single().execute()
+            profile = profile_resp.data
+            expires_at = _get_subscription_expires_at(supabase, user_id)
+            user_data = {
+                "id": user_id,
+                "name": profile.get("name"),
+                "role": profile.get("role"),
+                "avatar": profile.get("avatar"),
+                "bio": profile.get("bio"),
+                "subscription_status": profile.get("subscription_status"),
+                "subscription_expires_at": expires_at,
+                "gender": profile.get("gender"),
+                "city": profile.get("city"),
+                "phone": profile.get("phone"),
+                "birthdate": profile.get("birthdate"),
+            }
+        except Exception as profile_exc:
+            logger.warning("[payments.renew] Failed to fetch updated profile for auto-approved: %s", profile_exc)
+            user_data = None
+
+        return {
+            "payment": approved_payment,
+            "user": user_data,
+            "message": "¡Pago de renovación verificado automáticamente! Tu membresía ha sido reactivada.",
+        }
 
     return {
         "payment": payment,

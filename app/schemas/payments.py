@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,8 @@ class RegisterWithPaymentRequest(BaseModel):
     currency_id: str = Field(..., min_length=1, description="UUID de la divisa en la que pagó el usuario")
     amount_local: float = Field(..., gt=0, description="Monto real en la divisa local (ej. 400 Bs.)")
     exchange_rate: float = Field(..., gt=0, description="Tasa congelada en el momento del pago (1 USD = X local)")
+    banco_origen: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
+    cedula_pagador: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
 
 
 class RenewSubscriptionRequest(BaseModel):
@@ -36,4 +38,6 @@ class RenewSubscriptionRequest(BaseModel):
     currency_id: str = Field(..., min_length=1, description="UUID de la divisa en la que pagó el usuario")
     amount_local: float = Field(..., gt=0, description="Monto real en la divisa local (ej. 400 Bs.)")
     exchange_rate: float = Field(..., gt=0, description="Tasa congelada en el momento del pago (1 USD = X local)")
+    banco_origen: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
+    cedula_pagador: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
 

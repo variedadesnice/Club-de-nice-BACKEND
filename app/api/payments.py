@@ -16,11 +16,12 @@ def upload_receipt(body: UploadReceiptRequest):
 
 @router.post("/register", status_code=201, dependencies=[Depends(rate_limiter(5, 600, "payments-register"))])
 def register_with_payment(body: RegisterWithPaymentRequest):
-    """Público — registra al usuario, crea su perfil inactivo y deja el pago en revisión ('pending')."""
+    """Público — registra al usuario, crea su perfil inactivo y deja el pago en revisión o auto-aprobado."""
     return payments_service.register_with_payment(
         body.name, body.email, body.password, body.plan, body.amount,
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
+        body.banco_origen, body.cedula_pagador,
     )
 
 
@@ -31,6 +32,7 @@ def renew_subscription(body: RenewSubscriptionRequest, current_user: dict = Depe
         current_user["id"], body.plan, body.amount,
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
+        body.banco_origen, body.cedula_pagador,
     )
 
 
