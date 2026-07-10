@@ -95,41 +95,43 @@ def _verify_payment_automatically(
     cedula_pagador: Optional[str],
 ) -> Optional[dict]:
     """
-    Intenta verificar el pago a través de la API externa configurada en
-    Settings.payment_verification_url. Si es exitoso, aprueba el pago inmediatamente.
-    Retorna el registro de pago aprobado o None si no se auto-aprobó.
+    Llama a la API externa de verificación de Pago Móvil.
+    Si la respuesta es exitosa (status=success, pago=true), aprueba el pago
+    inmediatamente y devuelve el registro aprobado.
+    Si falla por cualquier motivo, devuelve None y el pago queda en 'pending'.
     """
     settings = get_settings()
-    if not settings.payment_verification_url:
-        logger.info("[_verify_payment_automatically] No payment_verification_url configured, skipping.")
+    url = settings.payment_verification_url
+
+    if not url:
+        logger.info("[verify_auto] Sin URL configurada, omitiendo verificación.")
         return None
 
-    if not method_auto_verify or not banco_origen or not cedula_pagador:
-        logger.info(
-            "[_verify_payment_automatically] Skipping: auto_verify=%s, banco_origen=%s, cedula_pagador=%s",
-            method_auto_verify, banco_origen, cedula_pagador
-        )
+    if not method_auto_verify:
+        logger.info("[verify_auto] Método sin auto_verify=True, omitiendo.")
         return None
 
-    logger.info("[_verify_payment_automatically] Triggering for payment_id=%s reference=%s", payment_id, reference_number)
-    
+    if not banco_origen or not cedula_pagador:
+        logger.info("[verify_auto] Faltan banco_origen o cedula_pagador, omitiendo.")
+        return None
+
+    logger.info("[verify_auto] Iniciando para payment_id=%s referencia=%s", payment_id, reference_number)
+
     try:
-        # 1. Download file from Supabase storage
+        # 1. Descargar comprobante desde Supabase Storage
         supabase = get_supabase()
         file_bytes = supabase.storage.from_(_RECEIPT_BUCKET).download(receipt_path)
-        
-        # 2. Base64 encode
-        import base64
+
+        # 2. Codificar en Base64 como Data URI
         mime_type, _ = mimetypes.guess_type(receipt_path)
         if not mime_type:
             mime_type = "image/jpeg"
-        base64_img = base64.b64encode(file_bytes).decode("utf-8")
-        foto_comprobante = f"data:{mime_type};base64,{base64_img}"
-        
-        # 3. Clean phone
+        foto_comprobante = f"data:{mime_type};base64,{base64.b64encode(file_bytes).decode('utf-8')}"
+
+        # 3. Normalizar teléfono al formato venezolano (04XXXXXXXXX)
         telefono_pagador = _normalize_phone_for_verification(phone)
-        
-        # 4. Prepare payload
+
+        # 4. Armar payload exacto que pide la API
         payload = {
             "metodo_pago": "pagomovil",
             "numero_referencia": reference_number,
@@ -138,44 +140,41 @@ def _verify_payment_automatically(
             "cedula_pagador": cedula_pagador,
             "monto": float(amount_local),
             "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "foto_comprobante": foto_comprobante
+            "foto_comprobante": foto_comprobante,
         }
-        
-        # Simulation / Mock mode for development if using the placeholder URL
-        if "api.tu-marca.com" in url:
-            logger.info("[_verify_payment_automatically] [MOCK MODE] Simulating successful verification for testing placeholder URL.")
-            approved_payment = approve_payment(payment_id)
-            return approved_payment
 
-        # 5. Call API
+        # 5. Modo simulación para desarrollo (URL de ejemplo del proveedor)
+        if "api.tu-marca.com" in url:
+            logger.info("[verify_auto] [MOCK] URL de prueba detectada — simulando aprobación exitosa.")
+            return approve_payment(payment_id)
+
+        # 6. Llamar a la API real del proveedor
         import httpx
-        url = settings.payment_verification_url
-        
-        logger.info("[_verify_payment_automatically] Sending request to %s", url)
+        logger.info("[verify_auto] Enviando solicitud a %s", url)
         with httpx.Client(timeout=20.0) as client:
             resp = client.post(url, json=payload)
-            logger.info("[_verify_payment_automatically] Response status: %d", resp.status_code)
-            
+            logger.info("[verify_auto] Respuesta status=%d", resp.status_code)
+
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get("status") == "success" and data.get("pago") is True:
-                    logger.info("[_verify_payment_automatically] API verified payment successfully! Approving payment %s", payment_id)
-                    approved_payment = approve_payment(payment_id)
-                    return approved_payment
+                    logger.info("[verify_auto] Pago verificado por la API. Aprobando payment_id=%s", payment_id)
+                    return approve_payment(payment_id)
                 else:
-                    logger.info("[_verify_payment_automatically] Payment NOT verified by API. Response: %s", data)
+                    logger.info("[verify_auto] API no verificó el pago. Respuesta: %s", data)
             else:
-                logger.warning("[_verify_payment_automatically] API returned non-200 status: %d, Response: %s", resp.status_code, resp.text)
-                
+                logger.warning("[verify_auto] API respondió %d: %s", resp.status_code, resp.text)
+
     except Exception as exc:
-        logger.exception("[_verify_payment_automatically] Error during automatic payment verification: %s", exc)
-        
+        logger.exception("[verify_auto] Error en verificación automática: %s", exc)
+
     return None
 
 
 # ---------------------------------------------------------------------------
 # Registro con pago
 # ---------------------------------------------------------------------------
+
 
 def register_with_payment(
     name: str, email: str, password: str, plan: str, amount: float,
