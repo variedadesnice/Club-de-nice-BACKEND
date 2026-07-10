@@ -86,7 +86,7 @@ def _normalize_phone_for_verification(phone: str) -> str:
 
 def _verify_payment_automatically(
     payment_id: str,
-    payment_method_name: str,
+    method_auto_verify: bool,
     reference_number: str,
     phone: str,
     amount_local: float,
@@ -104,11 +104,10 @@ def _verify_payment_automatically(
         logger.info("[_verify_payment_automatically] No payment_verification_url configured, skipping.")
         return None
 
-    is_pago_movil = "movil" in payment_method_name.lower() or "móvil" in payment_method_name.lower()
-    if not is_pago_movil or not banco_origen or not cedula_pagador:
+    if not method_auto_verify or not banco_origen or not cedula_pagador:
         logger.info(
-            "[_verify_payment_automatically] Skipping auto-verification: method=%s, banco_origen=%s, cedula_pagador=%s",
-            payment_method_name, banco_origen, cedula_pagador
+            "[_verify_payment_automatically] Skipping: auto_verify=%s, banco_origen=%s, cedula_pagador=%s",
+            method_auto_verify, banco_origen, cedula_pagador
         )
         return None
 
@@ -201,7 +200,7 @@ def register_with_payment(
     try:
         method_resp = (
             supabase.table("payment_methods")
-            .select("id, name, is_active")
+            .select("id, name, is_active, auto_verify")
             .eq("id", payment_method_id)
             .maybe_single()
             .execute()
@@ -285,7 +284,7 @@ def register_with_payment(
 
     # Intentar la verificación automática del pago
     approved_payment = _verify_payment_automatically(
-        payment["id"], method["name"], reference_number, phone,
+        payment["id"], method.get("auto_verify", False), reference_number, phone,
         amount_local, receipt_path, banco_origen, cedula_pagador
     )
 
@@ -588,7 +587,7 @@ def renew_subscription(
     try:
         method_resp = (
             supabase.table("payment_methods")
-            .select("id, name, is_active")
+            .select("id, name, is_active, auto_verify")
             .eq("id", payment_method_id)
             .maybe_single()
             .execute()
@@ -634,7 +633,7 @@ def renew_subscription(
 
     # Intentar la verificación automática del pago
     approved_payment = _verify_payment_automatically(
-        payment["id"], method["name"], reference_number, phone,
+        payment["id"], method.get("auto_verify", False), reference_number, phone,
         amount_local, receipt_path, banco_origen, cedula_pagador
     )
 

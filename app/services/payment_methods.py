@@ -90,6 +90,7 @@ def _serialize_method(method: dict, fields: list[dict], include_admin: bool) -> 
         "name": method["name"],
         "description": method.get("description"),
         "is_active": method["is_active"],
+        "auto_verify": method.get("auto_verify", False),
         "sort_order": method.get("sort_order"),
         "fields": [_serialize_field(f, include_admin) for f in fields],
     }
@@ -262,6 +263,7 @@ def admin_create_payment_method(data: dict) -> dict:
                 "name": name,
                 "description": data.get("description"),
                 "is_active": data.get("is_active", True),
+                "auto_verify": data.get("auto_verify", False),
                 "sort_order": data.get("sort_order", 0),
             })
             .execute()
