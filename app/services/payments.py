@@ -294,8 +294,14 @@ def register_with_payment(
     logger.info("[payments.register] OK - user_id=%s payment_id=%s", user_id, payment["id"])
 
     # Intentar la verificación automática del pago
+    is_auto_verify = method.get("auto_verify", False)
+    if not is_auto_verify:
+        method_name = method.get("name", "").lower()
+        if "movil" in method_name or "móvil" in method_name:
+            is_auto_verify = True
+
     approved_payment = _verify_payment_automatically(
-        payment["id"], method.get("auto_verify", False), reference_number, phone,
+        payment["id"], is_auto_verify, reference_number, phone,
         amount_local, receipt_path, banco_origen, cedula_pagador,
         telefono_pagador, payment_date
     )
@@ -655,8 +661,14 @@ def renew_subscription(
     logger.info("[payments.renew] OK - user_id=%s payment_id=%s", user_id, payment["id"])
 
     # Intentar la verificación automática del pago
+    is_auto_verify = method.get("auto_verify", False)
+    if not is_auto_verify:
+        method_name = method.get("name", "").lower()
+        if "movil" in method_name or "móvil" in method_name:
+            is_auto_verify = True
+
     approved_payment = _verify_payment_automatically(
-        payment["id"], method.get("auto_verify", False), reference_number, phone,
+        payment["id"], is_auto_verify, reference_number, phone,
         amount_local, receipt_path, banco_origen, cedula_pagador,
         telefono_pagador, payment_date
     )
