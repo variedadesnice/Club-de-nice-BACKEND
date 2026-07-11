@@ -8,6 +8,17 @@ from app.services import payments as payments_service
 router = APIRouter()
 
 
+@router.get("/diagnostic-ip")
+def get_diagnostic_ip():
+    """Ruta pública de diagnóstico para conocer la IP pública saliente actual del backend."""
+    import httpx
+    try:
+        resp = httpx.get("https://api.ipify.org?format=json", timeout=10.0)
+        return {"outbound_ip": resp.json().get("ip")}
+    except Exception as e:
+        return {"error": f"No se pudo determinar la IP: {str(e)}"}
+
+
 @router.post("/upload-receipt")
 def upload_receipt(body: UploadReceiptRequest):
     """Público — sube el comprobante al bucket receipts antes del registro y devuelve su path."""
