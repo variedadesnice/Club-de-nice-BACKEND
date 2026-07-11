@@ -35,7 +35,7 @@ def _base(preheader: str, body: str) -> str:
     <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="max-width:560px;">
 
       <!-- Logo / Header -->
-      <tr><td style="background:#6366f1;border-radius:20px 20px 0 0;padding:32px 40px;text-align:center;">
+      <tr><td style="background:#db2777;border-radius:20px 20px 0 0;padding:32px 40px;text-align:center;">
         <p style="margin:0;color:#fff;font-size:22px;font-weight:900;letter-spacing:-0.3px;">{s.app_name}</p>
       </td></tr>
 
@@ -44,7 +44,7 @@ def _base(preheader: str, body: str) -> str:
         {body}
         <hr style="border:0;border-top:1px solid #f1f5f9;margin:32px 0 0;">
         <p style="margin:16px 0 0;color:#94a3b8;font-size:12px;line-height:1.5;">
-          Si tienes dudas, responde a este correo.<br>
+          Este es un correo automático, por favor no respondas a este mensaje.<br>
           © {s.app_name} · Todos los derechos reservados.
         </p>
       </td></tr>
@@ -56,7 +56,7 @@ def _base(preheader: str, body: str) -> str:
 </html>"""
 
 
-def _btn(text: str, url: str, color: str = "#6366f1") -> str:
+def _btn(text: str, url: str, color: str = "#db2777") -> str:
     return (
         f'<table cellpadding="0" cellspacing="0" role="presentation" style="margin:28px 0;">'
         f'<tr><td style="border-radius:12px;background:{color};">'
@@ -74,7 +74,7 @@ def _p(text: str) -> str:
     return f'<p style="margin:0 0 16px;color:#475569;font-size:15px;line-height:1.6;">{text}</p>'
 
 
-def _badge(text: str, color: str = "#6366f1") -> str:
+def _badge(text: str, color: str = "#db2777") -> str:
     return (
         f'<span style="display:inline-block;background:{color}15;color:{color};'
         f'border-radius:8px;padding:4px 12px;font-size:13px;font-weight:900;">{text}</span>'
@@ -171,6 +171,18 @@ def _renewal_reminder_html(name: str, days_left: int, expires_date: str) -> str:
     return _base(f"Tu suscripción vence {urgency_text}", body)
 
 
+def _raffle_winner_html(name: str, raffle_title: str) -> str:
+    s = get_settings()
+    body = (
+        _h1("¡Felicidades, ganaste! 🎉")
+        + _p(f"Hola <strong>{name}</strong>, tenemos una gran noticia: fuiste elegido/a ganador/a del sorteo "
+             f"<strong>{raffle_title}</strong>.")
+        + _p("Nuestro equipo se pondrá en contacto contigo pronto para coordinar la entrega de tu premio.")
+        + _btn("Ir al Club", s.app_url, "#16a34a")
+    )
+    return _base(f"¡Ganaste el sorteo {raffle_title}!", body)
+
+
 def _expired_html(name: str) -> str:
     s = get_settings()
     body = (
@@ -178,8 +190,7 @@ def _expired_html(name: str) -> str:
         + _p(f"Hola <strong>{name}</strong>, tu suscripción a El Club de Nice <strong>ha expirado</strong>. "
              "Tu acceso está temporalmente suspendido.")
         + _p("Renueva para volver a disfrutar de la comunidad, cursos y sesiones en vivo.")
-        + _btn("Renovar ahora", f"{s.app_url}/renovar", "#6366f1")
-        + _p("¿Tienes dudas? Responde a este correo y te ayudamos.")
+        + _btn("Renovar ahora", f"{s.app_url}/renovar", "#db2777")
     )
     return _base("Tu suscripción ha expirado", body)
 
@@ -214,6 +225,11 @@ def send_renewal_reminder(to: str, name: str, days_left: int, expires_date: str)
 def send_expired_notice(to: str, name: str) -> None:
     """Aviso de cuenta vencida."""
     _send(to, "Tu suscripción ha vencido — El Club de Nice", _expired_html(name))
+
+
+def send_raffle_winner(to: str, name: str, raffle_title: str) -> None:
+    """Notificación a un ganador de sorteo tras el draw."""
+    _send_async(to, f'¡Ganaste el sorteo "{raffle_title}"! 🎉', _raffle_winner_html(name, raffle_title))
 
 
 # ─── Lógica de recordatorios automáticos ─────────────────────────────────────

@@ -300,10 +300,6 @@ def register_with_payment(
 
     # Intentar la verificación automática del pago
     is_auto_verify = method.get("auto_verify", False)
-    if not is_auto_verify:
-        method_name = method.get("name", "").lower()
-        if "movil" in method_name or "móvil" in method_name:
-            is_auto_verify = True
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
@@ -667,10 +663,6 @@ def renew_subscription(
 
     # Intentar la verificación automática del pago
     is_auto_verify = method.get("auto_verify", False)
-    if not is_auto_verify:
-        method_name = method.get("name", "").lower()
-        if "movil" in method_name or "móvil" in method_name:
-            is_auto_verify = True
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,

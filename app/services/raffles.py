@@ -172,7 +172,24 @@ def draw_raffle(raffle_id: str, include_email: bool = False) -> dict:
         logger.error("[raffles.draw] FAILED setting drawn_at: %s", msg, exc_info=True)
         raise HTTPException(status_code=500, detail=msg)
 
-    return get_raffle(raffle_id, include_email=include_email)
+    result = get_raffle(raffle_id, include_email=True)
+    _notify_winners(result["title"], result["winners"])
+    if not include_email:
+        for w in result["winners"]:
+            w.pop("email", None)
+    return result
+
+
+def _notify_winners(raffle_title: str, winners: list) -> None:
+    """Envía el correo de felicitación a cada ganador. Fire-and-forget, nunca bloquea el draw."""
+    from app.services import email as email_service
+
+    for w in winners:
+        to = w.get("email")
+        if not to:
+            logger.warning("[raffles._notify_winners] sin email para user_id=%s, se omite notificación", w.get("user_id"))
+            continue
+        email_service.send_raffle_winner(to, w.get("name") or "miembro", raffle_title)
 
 
 def draw_scheduled_raffles() -> dict:
