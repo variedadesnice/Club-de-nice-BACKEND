@@ -26,6 +26,8 @@ RESEND_API_KEY=re_...                          # From resend.com dashboard
 FROM_EMAIL=El Club de Nice <hola@tudominio.com>
 APP_URL=https://tudominio.com                  # Used in email CTAs and password reset redirect
 APP_NAME=El Club de Nice
+
+PAYMENT_VERIFICATION_URL=https://...            # Optional — external Pago Móvil auto-verification API. Unset = auto-verify silently skipped, payments stay "pending" for manual review.
 ```
 
 `app/core/config.py` validates these at startup via `pydantic-settings`. The `get_settings()` function is `@lru_cache`-d — restart the server if you change `.env`.
@@ -158,15 +160,21 @@ Unchanged from the original social-feed design. **Always query `posts_view` for 
 | `paid_at` | timestamptz | Set on approval |
 | `expires_at` | timestamptz | NULL for "indefinido"; calculated from plan on approval |
 | `created_at` | timestamptz | |
+| `origin_bank` | text, nullable | Pago Móvil sender bank code (e.g. `0102`). Renamed from `banco_origen` 2026-07-11. |
+| `payer_id_number` | text, nullable | Payer's Venezuelan national ID (cédula, e.g. `V12177212`). Renamed from `cedula_pagador`. |
+| `payer_phone` | text, nullable | Payer's Pago Móvil phone number. Renamed from `telefono_pagador`. |
+| `payment_date` | date, nullable | Date the user claims to have paid, as entered on the form. |
 
 **Plan durations**: `1m` = 30 d · `3m` = 90 d · `6m` = 180 d · `1y` = 365 d · `indefinido` = NULL
+
+**Automatic Pago Móvil verification**: if `PAYMENT_VERIFICATION_URL` is configured and the selected `payment_methods.auto_verify` is `true` (or the method name contains "movil"/"móvil" as a fallback — see `register_with_payment`/`renew_subscription` in `app/services/payments.py`), `_verify_payment_automatically()` downloads the uploaded receipt, base64-encodes it, and POSTs it plus `origin_bank`/`payer_id_number`/`payer_phone`/`amount_local`/`payment_date` to that external API. **The outbound JSON payload keys are the external API's contract and stay in Spanish** (`metodo_pago`, `numero_referencia`, `banco_origen`, `telefono_pagador`, `cedula_pagador`, `monto`, `fecha`, `foto_comprobante`) even though the internal Python variables and DB columns are English — do not rename those payload keys. On a `{status: "success"|"ok", pago: true}` response, the payment is approved immediately (same as an admin approval); any other outcome leaves it `"pending"` for manual review. `GET /api/payments/diagnostic-ip` (public) reports the backend's outbound IP, typically needed to get whitelisted by the verification API provider.
 
 ### `currencies`
 `id`, `code` (unique, normalized uppercase), `name`, `symbol`, `is_base` (bool — the USD/base row, can't be deleted or deactivated), `is_active`, `created_at`, `updated_at`
 
 ### `payment_methods` / `payment_method_fields` / `payment_method_values`
 Configurable catalog of payment instructions admins manage, surfaced to users during registration:
-- `payment_methods`: `id`, `name`, `description`, `is_active`, `sort_order`
+- `payment_methods`: `id`, `name`, `description`, `is_active`, `sort_order`, `auto_verify` (bool — enables the automatic Pago Móvil verification flow below for this method)
 - `payment_method_fields`: `id`, `payment_method_id` FK, `field_key`, `field_label`, `field_type` (`text`\|`email`\|`phone`\|`number`), `is_required`, `sort_order`
 - `payment_method_values`: `id`, `payment_method_id` FK, `payment_method_field_id` FK, `value` (nullable) — the actual displayed value (e.g. an account number)
 
@@ -519,8 +527,9 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 | Method | Path | Auth | Body | Returns |
 |--------|------|------|------|---------|
 | POST | `/api/payments/upload-receipt` | — | `{reference_number, filename, fileData: "data:...;base64,..."}` | `{path}` |
-| POST | `/api/payments/register` | — | `{name, email, password, plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path}` | `{user, payment, message}` |
-| POST | `/api/payments/renew` | 🔑 | `{plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path}` | `{payment, message}` (201) — renewal payment for an already-registered user, same "pending" review flow as registration |
+| GET | `/api/payments/diagnostic-ip` | — | — | `{outbound_ip}` — backend's outbound IP, for whitelisting with the Pago Móvil verification provider |
+| POST | `/api/payments/register` | — | `{name, email, password, plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path, origin_bank?, payer_id_number?, payer_phone?, payment_date?}` | `{user, payment, message}` — auto-approved if the method has automatic Pago Móvil verification enabled and the external API confirms it |
+| POST | `/api/payments/renew` | 🔑 | Same optional Pago Móvil fields as `/register` | `{payment, message}` (201) — renewal payment for an already-registered user, same "pending"/auto-verify flow as registration |
 | GET | `/api/payments/` | 👑 | — | `[Payment]` with user_name, ordered newest first |
 | GET | `/api/payments/{user_id}` | 🔑 | — | `[Payment]` for that user |
 | PATCH | `/api/payments/{id}/approve` | 👑 | — | Payment (sets status=success, expires_at) |

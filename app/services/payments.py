@@ -91,9 +91,9 @@ def _verify_payment_automatically(
     phone: str,
     amount_local: float,
     receipt_path: str,
-    banco_origen: Optional[str],
-    cedula_pagador: Optional[str],
-    telefono_pagador: Optional[str] = None,
+    origin_bank: Optional[str],
+    payer_id_number: Optional[str],
+    payer_phone: Optional[str] = None,
     payment_date: Optional[str] = None,
 ) -> Optional[dict]:
     """
@@ -101,6 +101,11 @@ def _verify_payment_automatically(
     Si la respuesta es exitosa (status=success, pago=true), aprueba el pago
     inmediatamente y devuelve el registro aprobado.
     Si falla por cualquier motivo, devuelve None y el pago queda en 'pending'.
+
+    Nota: las claves del payload (metodo_pago, numero_referencia, banco_origen,
+    telefono_pagador, cedula_pagador, monto, fecha, foto_comprobante) son el
+    contrato exacto de la API externa de verificación — no renombrar, aunque
+    las variables internas ya estén en inglés.
     """
     settings = get_settings()
     url = settings.payment_verification_url
@@ -113,8 +118,8 @@ def _verify_payment_automatically(
         logger.info("[verify_auto] Método sin auto_verify=True, omitiendo.")
         return None
 
-    if not banco_origen or not cedula_pagador:
-        logger.info("[verify_auto] Faltan banco_origen o cedula_pagador, omitiendo.")
+    if not origin_bank or not payer_id_number:
+        logger.info("[verify_auto] Faltan origin_bank o payer_id_number, omitiendo.")
         return None
 
     logger.info("[verify_auto] Iniciando para payment_id=%s referencia=%s", payment_id, reference_number)
@@ -131,16 +136,16 @@ def _verify_payment_automatically(
         foto_comprobante = f"data:{mime_type};base64,{base64.b64encode(file_bytes).decode('utf-8')}"
 
         # 3. Normalizar teléfono al formato venezolano (04XXXXXXXXX)
-        target_phone = telefono_pagador if telefono_pagador else phone
-        telefono_pagador_normalized = _normalize_phone_for_verification(target_phone)
+        target_phone = payer_phone if payer_phone else phone
+        payer_phone_normalized = _normalize_phone_for_verification(target_phone)
 
-        # 4. Armar payload exacto que pide la API
+        # 4. Armar payload exacto que pide la API (claves en español: contrato externo)
         payload = {
             "metodo_pago": "pagomovil",
             "numero_referencia": reference_number,
-            "banco_origen": banco_origen,
-            "telefono_pagador": telefono_pagador_normalized,
-            "cedula_pagador": cedula_pagador,
+            "banco_origen": origin_bank,
+            "telefono_pagador": payer_phone_normalized,
+            "cedula_pagador": payer_id_number,
             "monto": float(amount_local),
             "fecha": payment_date if payment_date else datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "foto_comprobante": foto_comprobante,
@@ -180,8 +185,8 @@ def register_with_payment(
     name: str, email: str, password: str, plan: str, amount: float,
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
-    banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
-    telefono_pagador: Optional[str] = None, payment_date: Optional[str] = None,
+    origin_bank: Optional[str] = None, payer_id_number: Optional[str] = None,
+    payer_phone: Optional[str] = None, payment_date: Optional[str] = None,
 ) -> dict:
     """
     Crea el usuario en Supabase Auth + perfil (role='miembro', subscription_status='inactive')
@@ -265,18 +270,18 @@ def register_with_payment(
         "currency_id": currency_id,
         "amount_local": amount_local,
         "exchange_rate": exchange_rate,
-        "banco_origen": banco_origen,
-        "cedula_pagador": cedula_pagador,
-        "telefono_pagador": telefono_pagador,
+        "origin_bank": origin_bank,
+        "payer_id_number": payer_id_number,
+        "payer_phone": payer_phone,
         "payment_date": payment_date,
     }
     try:
         payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        if "telefono_pagador" in msg or "payment_date" in msg:
-            logger.warning("[payments.register] Faltan columnas en DB. Reintentando sin telefono_pagador/payment_date. Error: %s", msg)
-            insert_data.pop("telefono_pagador", None)
+        if "payer_phone" in msg or "payment_date" in msg:
+            logger.warning("[payments.register] Faltan columnas en DB. Reintentando sin payer_phone/payment_date. Error: %s", msg)
+            insert_data.pop("payer_phone", None)
             insert_data.pop("payment_date", None)
             try:
                 payment_resp = supabase.table("payments").insert(insert_data).execute()
@@ -302,8 +307,8 @@ def register_with_payment(
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
-        amount_local, receipt_path, banco_origen, cedula_pagador,
-        telefono_pagador, payment_date
+        amount_local, receipt_path, origin_bank, payer_id_number,
+        payer_phone, payment_date
     )
 
     if approved_payment:
@@ -592,8 +597,8 @@ def renew_subscription(
     user_id: str, plan: str, amount: float,
     payment_method_id: str, reference_number: str, phone: str, receipt_path: str,
     currency_id: str, amount_local: float, exchange_rate: float,
-    banco_origen: Optional[str] = None, cedula_pagador: Optional[str] = None,
-    telefono_pagador: Optional[str] = None, payment_date: Optional[str] = None,
+    origin_bank: Optional[str] = None, payer_id_number: Optional[str] = None,
+    payer_phone: Optional[str] = None, payment_date: Optional[str] = None,
 ) -> dict:
     """
     Registra un pago de renovación de suscripción para un usuario ya existente.
@@ -634,18 +639,18 @@ def renew_subscription(
         "currency_id": currency_id,
         "amount_local": amount_local,
         "exchange_rate": exchange_rate,
-        "banco_origen": banco_origen,
-        "cedula_pagador": cedula_pagador,
-        "telefono_pagador": telefono_pagador,
+        "origin_bank": origin_bank,
+        "payer_id_number": payer_id_number,
+        "payer_phone": payer_phone,
         "payment_date": payment_date,
     }
     try:
         payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        if "telefono_pagador" in msg or "payment_date" in msg:
-            logger.warning("[payments.renew] Faltan columnas en DB. Reintentando sin telefono_pagador/payment_date. Error: %s", msg)
-            insert_data.pop("telefono_pagador", None)
+        if "payer_phone" in msg or "payment_date" in msg:
+            logger.warning("[payments.renew] Faltan columnas en DB. Reintentando sin payer_phone/payment_date. Error: %s", msg)
+            insert_data.pop("payer_phone", None)
             insert_data.pop("payment_date", None)
             try:
                 payment_resp = supabase.table("payments").insert(insert_data).execute()
@@ -669,8 +674,8 @@ def renew_subscription(
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
-        amount_local, receipt_path, banco_origen, cedula_pagador,
-        telefono_pagador, payment_date
+        amount_local, receipt_path, origin_bank, payer_id_number,
+        payer_phone, payment_date
     )
 
     if approved_payment:
