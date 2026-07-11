@@ -146,12 +146,7 @@ def _verify_payment_automatically(
             "foto_comprobante": foto_comprobante,
         }
 
-        # 5. Modo simulación para desarrollo (URL de ejemplo del proveedor)
-        if "api.tu-marca.com" in url:
-            logger.info("[verify_auto] [MOCK] URL de prueba detectada — simulando aprobación exitosa.")
-            return approve_payment(payment_id)
-
-        # 6. Llamar a la API real del proveedor
+        # 5. Llamar a la API real de verificación
         import httpx
         logger.info("[verify_auto] Enviando solicitud a %s", url)
         with httpx.Client(timeout=20.0) as client:
@@ -160,7 +155,9 @@ def _verify_payment_automatically(
 
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("status") == "success" and data.get("pago") is True:
+                status_ok = data.get("status") in ("success", "ok")
+                pago_ok = data.get("pago") is True or data.get("pago") == "true"
+                if status_ok and pago_ok:
                     logger.info("[verify_auto] Pago verificado por la API. Aprobando payment_id=%s", payment_id)
                     return approve_payment(payment_id)
                 else:
