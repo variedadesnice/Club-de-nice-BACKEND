@@ -27,7 +27,8 @@ FROM_EMAIL=El Club de Nice <hola@tudominio.com>
 APP_URL=https://tudominio.com                  # Used in email CTAs and password reset redirect
 APP_NAME=El Club de Nice
 
-PAYMENT_VERIFICATION_URL=https://...            # Optional — external Pago Móvil auto-verification API. Unset = auto-verify silently skipped, payments stay "pending" for manual review.
+SENDHOOK_API_URL=https://tu-backend.vercel.app  # Optional — SendHook base URL (Pago Móvil auto-verification). Unset = auto-verify silently skipped, payments stay "pending" for manual review.
+SENDHOOK_API_KEY=...                            # Per-empresa API key issued by SendHook admin (POST /admin/empresas)
 ```
 
 `app/core/config.py` validates these at startup via `pydantic-settings`. The `get_settings()` function is `@lru_cache`-d — restart the server if you change `.env`.
@@ -167,7 +168,11 @@ Unchanged from the original social-feed design. **Always query `posts_view` for 
 
 **Plan durations**: `1m` = 30 d · `3m` = 90 d · `6m` = 180 d · `1y` = 365 d · `indefinido` = NULL
 
-**Automatic Pago Móvil verification**: if `PAYMENT_VERIFICATION_URL` is configured and the selected `payment_methods.auto_verify` is `true` (the DB flag alone — there is no name-based fallback, removed 2026-07-11 because it silently overrode an admin explicitly setting `auto_verify=false` on a "movil"-named method), `_verify_payment_automatically()` downloads the uploaded receipt, base64-encodes it, and POSTs it plus `origin_bank`/`payer_id_number`/`payer_phone`/`amount_local`/`payment_date` to that external API. **The outbound JSON payload keys are the external API's contract and stay in Spanish** (`metodo_pago`, `numero_referencia`, `banco_origen`, `telefono_pagador`, `cedula_pagador`, `monto`, `fecha`, `foto_comprobante`) even though the internal Python variables and DB columns are English — do not rename those payload keys. On a `{status: "success"|"ok", pago: true}` response, the payment is approved immediately (same as an admin approval); any other outcome leaves it `"pending"` for manual review. `GET /api/payments/diagnostic-ip` (public) reports the backend's outbound IP, typically needed to get whitelisted by the verification API provider.
+**Automatic Pago Móvil verification (SendHook, since 2026-07-26)**: if `SENDHOOK_API_URL`/`SENDHOOK_API_KEY` are configured and the selected `payment_methods.auto_verify` is `true` (the DB flag alone), `_verify_payment_automatically()` in `app/services/payments.py` POSTs `{monto, banco, referencia, contraparte?}` (`X-API-Key` header) to `{SENDHOOK_API_URL}/pagos/verificar`.
+
+> ⚠️ **`banco` is the destination bank, not the sender's bank.** SendHook's phone is logged into *El Club de Nice's own* receiving account — `banco` must identify which of *our* accounts got the money, never `payments.origin_bank` (that column is the payer's sending bank, entered by the user, kept only for display/manual review). The destination bank is resolved by `_get_destination_bank_slug()`: it reads the value of whichever `payment_method_fields` row has `field_label == "Banco"` for that payment method (the same admin-configured display field users see at checkout, e.g. value `"BNC"` or `"Banco de Venezuela"`) and normalizes free text to SendHook's slug (`bdv`/`bnc`/`bfc`/`binance`) via `_normalize_sendhook_bank_label()`. To change which bank auto-verify targets (e.g. switch the business's receiving account from BNC to BDV), just edit that field's value in the payment method's config (admin panel `PUT /api/admin/payment-methods/{id}/values`, or directly in `payment_method_values`) — no code change or redeploy needed. If that value doesn't resolve to a bank SendHook supports (e.g. Banesco), verification is skipped silently and the payment stays `"pending"`.
+
+On `{verificado: true}`, the payment is approved immediately (same as an admin approval); anything else leaves it `"pending"` for manual review. No receipt/cédula/fecha is sent — SendHook matches purely on amount + bank + reference (or counterpart phone/name, normalized to local `0XXXXXXXXXX` format by `_normalize_phone_for_verification()`, which is defensive against double-prefixed phone bugs like `+5804243771486`). `GET /api/payments/diagnostic-ip` (public) reports the backend's outbound IP — leftover from the previous verification provider, likely no longer needed for SendHook whitelisting.
 
 ### `currencies`
 `id`, `code` (unique, normalized uppercase), `name`, `symbol`, `is_base` (bool — the USD/base row, can't be deleted or deactivated), `is_active`, `created_at`, `updated_at`

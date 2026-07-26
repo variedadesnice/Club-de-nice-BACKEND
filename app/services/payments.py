@@ -1,6 +1,6 @@
 import base64
+import json
 import logging
-import mimetypes
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -17,6 +17,63 @@ logger = logging.getLogger(__name__)
 _PLAN_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365}
 _RECEIPT_BUCKET = "receipts"
 _SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9._-]")
+
+def _normalize_sendhook_bank_label(value: str) -> Optional[str]:
+    """
+    Normaliza el texto libre del campo "Banco" (configurado por el admin en
+    payment_method_values, ej. "BNC", "Banco de Venezuela") al slug que
+    espera SendHook. Devuelve None si no es un banco que SendHook soporte hoy
+    (ej. Banesco) — en ese caso la verificación automática se omite.
+    """
+    v = (value or "").strip().lower()
+    if "bnc" in v or "nacional de cr" in v:
+        return "bnc"
+    if "bdv" in v or "de venezuela" in v:
+        return "bdv"
+    if "bfc" in v or "fondo com" in v:
+        return "bfc"
+    if "binance" in v:
+        return "binance"
+    return None
+
+
+def _get_destination_bank_slug(supabase, payment_method_id: str) -> Optional[str]:
+    """
+    Cuenta receptora de El Club de Nice para este método de pago (a qué banco
+    le está escuchando el teléfono de SendHook) — NO el banco emisor que
+    eligió el pagador. Se lee del campo cuyo field_label es "Banco" en
+    payment_method_fields/payment_method_values (el mismo mecanismo que ya
+    usa el admin para mostrarle al usuario los datos de pago).
+    """
+    try:
+        fields_resp = (
+            supabase.table("payment_method_fields")
+            .select("id, field_label")
+            .eq("payment_method_id", payment_method_id)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("[_get_destination_bank_slug] fields lookup failed method_id=%s [%s] %s", payment_method_id, type(exc).__name__, supabase_error(exc))
+        return None
+
+    field = next((f for f in (fields_resp.data or []) if f["field_label"].strip().lower() == "banco"), None)
+    if not field:
+        return None
+
+    try:
+        value_resp = (
+            supabase.table("payment_method_values")
+            .select("value")
+            .eq("payment_method_field_id", field["id"])
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("[_get_destination_bank_slug] value lookup failed field_id=%s [%s] %s", field["id"], type(exc).__name__, supabase_error(exc))
+        return None
+
+    value = (value_resp.data or {}).get("value")
+    return _normalize_sendhook_bank_label(value) if value else None
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +131,35 @@ def _cleanup_failed_registration(supabase, user_id: str) -> None:
 
 
 def _normalize_phone_for_verification(phone: str) -> str:
+    """
+    Normaliza a formato local venezolano 0XXXXXXXXXX (11 dígitos) para
+    contraparte de SendHook. Toma siempre los últimos 10 dígitos (código de
+    operadora + número, invariable sin importar el prefijo) y antepone "0" —
+    esto tolera basura de prefijo real observada en producción (ej.
+    "+5804243771486": el frontend concatena "+58" delante de un número que
+    el usuario ya tipeó con su "0" local, dejando un 13-dígitos inválido que
+    ningún prefijo fijo distingue de forma confiable).
+    """
     nums = "".join(c for c in phone if c.isdigit())
-    if nums.startswith("58") and len(nums) == 12:
-        return "0" + nums[2:]
-    if nums.startswith("0") and len(nums) == 11:
+    if len(nums) < 10:
         return nums
-    if len(nums) == 10 and not nums.startswith("0"):
-        return "0" + nums
-    return nums
+    return "0" + nums[-10:]
+
+
+def _build_verify_payload_json(amount_local: float, banco: str, referencia: str, contraparte: Optional[str]) -> str:
+    """
+    Arma el body de POST /pagos/verificar a mano en vez de dejar que el
+    encoder JSON por default de httpx/json.dumps serialice `monto` (un
+    float de Python recorta los ceros de cola: 25.50 -> "25.5", 0.10 ->
+    "0.1"). Formatear "monto" como f"{x:.2f}" y pegarlo como token numérico
+    sin comillas produce JSON igual de válido, con siempre 2 decimales.
+    """
+    monto_literal = f"{float(amount_local):.2f}"
+    rest = {"banco": banco, "referencia": referencia}
+    if contraparte:
+        rest["contraparte"] = contraparte
+    rest_json = json.dumps(rest)[1:]  # quita la "{" inicial, dejamos que "monto" abra el objeto
+    return f'{{"monto": {monto_literal}, {rest_json}'
 
 
 def _verify_payment_automatically(
@@ -90,85 +168,73 @@ def _verify_payment_automatically(
     reference_number: str,
     phone: str,
     amount_local: float,
-    receipt_path: str,
-    origin_bank: Optional[str],
-    payer_id_number: Optional[str],
+    sendhook_bank: Optional[str],
     payer_phone: Optional[str] = None,
-    payment_date: Optional[str] = None,
 ) -> Optional[dict]:
     """
-    Llama a la API externa de verificación de Pago Móvil.
-    Si la respuesta es exitosa (status=success, pago=true), aprueba el pago
-    inmediatamente y devuelve el registro aprobado.
-    Si falla por cualquier motivo, devuelve None y el pago queda en 'pending'.
+    Llama a la API de SendHook (POST /pagos/verificar) para verificar un pago
+    móvil automáticamente. Si SendHook responde verificado=true, aprueba el
+    pago inmediatamente y devuelve el registro aprobado. Si falla por
+    cualquier motivo (no configurado, banco destino no soportado, sin match,
+    error de red), devuelve None y el pago queda en 'pending' para revisión
+    manual.
 
-    Nota: las claves del payload (metodo_pago, numero_referencia, banco_origen,
-    telefono_pagador, cedula_pagador, monto, fecha, foto_comprobante) son el
-    contrato exacto de la API externa de verificación — no renombrar, aunque
-    las variables internas ya estén en inglés.
+    `sendhook_bank` es el banco RECEPTOR (la cuenta de El Club de Nice a la
+    que el teléfono con la app SendHook está escuchando) — no el banco emisor
+    que eligió el pagador. Se resuelve antes de llamar a esta función vía
+    `_get_destination_bank_slug()`.
     """
     settings = get_settings()
-    url = settings.payment_verification_url
+    base_url = settings.sendhook_api_url
+    api_key = settings.sendhook_api_key
 
-    if not url:
-        logger.info("[verify_auto] Sin URL configurada, omitiendo verificación.")
+    if not base_url or not api_key:
+        logger.info("[verify_auto] SendHook no configurado, omitiendo verificación.")
         return None
 
     if not method_auto_verify:
         logger.info("[verify_auto] Método sin auto_verify=True, omitiendo.")
         return None
 
-    if not origin_bank or not payer_id_number:
-        logger.info("[verify_auto] Faltan origin_bank o payer_id_number, omitiendo.")
+    if not sendhook_bank:
+        logger.info("[verify_auto] No se pudo resolver el banco receptor (campo 'Banco' del método), omitiendo.")
         return None
 
-    logger.info("[verify_auto] Iniciando para payment_id=%s referencia=%s", payment_id, reference_number)
+    logger.info("[verify_auto] Iniciando para payment_id=%s banco=%s referencia=%s", payment_id, sendhook_bank, reference_number)
+
+    # `contraparte` y `referencia` se filtran combinados (AND) en SendHook, y
+    # BNC/BDV guardan el teléfono enmascarado (ej. "0424***1486") — nuestro
+    # teléfono sin enmascarar nunca matchea ahí como substring. Como
+    # `reference_number` es obligatorio en este flujo, mandar `contraparte`
+    # además de la referencia solo puede romper un match que ya era válido,
+    # nunca ayuda. Mismo criterio que usa SendHook en sus propios ejemplos
+    # para BDV/BNC: solo `contraparte` cuando no hay referencia.
+    contraparte = None
+    if not reference_number:
+        target_phone = payer_phone if payer_phone else phone
+        contraparte = _normalize_phone_for_verification(target_phone) if target_phone else None
+    raw_body = _build_verify_payload_json(amount_local, sendhook_bank, reference_number, contraparte)
 
     try:
-        # 1. Descargar comprobante desde Supabase Storage
-        supabase = get_supabase()
-        file_bytes = supabase.storage.from_(_RECEIPT_BUCKET).download(receipt_path)
-
-        # 2. Codificar en Base64 como Data URI
-        mime_type, _ = mimetypes.guess_type(receipt_path)
-        if not mime_type:
-            mime_type = "image/jpeg"
-        foto_comprobante = f"data:{mime_type};base64,{base64.b64encode(file_bytes).decode('utf-8')}"
-
-        # 3. Normalizar teléfono al formato venezolano (04XXXXXXXXX)
-        target_phone = payer_phone if payer_phone else phone
-        payer_phone_normalized = _normalize_phone_for_verification(target_phone)
-
-        # 4. Armar payload exacto que pide la API (claves en español: contrato externo)
-        payload = {
-            "metodo_pago": "pagomovil",
-            "numero_referencia": reference_number,
-            "banco_origen": origin_bank,
-            "telefono_pagador": payer_phone_normalized,
-            "cedula_pagador": payer_id_number,
-            "monto": float(amount_local),
-            "fecha": payment_date if payment_date else datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "foto_comprobante": foto_comprobante,
-        }
-
-        # 5. Llamar a la API real de verificación
         import httpx
-        logger.info("[verify_auto] Enviando solicitud a %s", url)
+        url = f"{base_url.rstrip('/')}/pagos/verificar"
+        logger.info("[verify_auto] Enviando solicitud a %s body=%s", url, raw_body)
         with httpx.Client(timeout=20.0) as client:
-            resp = client.post(url, json=payload)
+            resp = client.post(
+                url, content=raw_body.encode("utf-8"),
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            )
             logger.info("[verify_auto] Respuesta status=%d", resp.status_code)
 
             if resp.status_code == 200:
                 data = resp.json()
-                status_ok = data.get("status") in ("success", "ok")
-                pago_ok = data.get("pago") is True or data.get("pago") == "true"
-                if status_ok and pago_ok:
-                    logger.info("[verify_auto] Pago verificado por la API. Aprobando payment_id=%s", payment_id)
+                if data.get("verificado") is True:
+                    logger.info("[verify_auto] Pago verificado por SendHook (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
                     return approve_payment(payment_id)
                 else:
-                    logger.info("[verify_auto] API no verificó el pago. Respuesta: %s", data)
+                    logger.info("[verify_auto] SendHook no encontró match. Respuesta: %s", data)
             else:
-                logger.warning("[verify_auto] API respondió %d: %s", resp.status_code, resp.text)
+                logger.warning("[verify_auto] SendHook respondió %d: %s", resp.status_code, resp.text)
 
     except Exception as exc:
         logger.exception("[verify_auto] Error en verificación automática: %s", exc)
@@ -300,11 +366,11 @@ def register_with_payment(
 
     # Intentar la verificación automática del pago
     is_auto_verify = method.get("auto_verify", False)
+    sendhook_bank = _get_destination_bank_slug(supabase, payment_method_id) if is_auto_verify else None
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
-        amount_local, receipt_path, origin_bank, payer_id_number,
-        payer_phone, payment_date
+        amount_local, sendhook_bank, payer_phone,
     )
 
     if approved_payment:
@@ -663,11 +729,11 @@ def renew_subscription(
 
     # Intentar la verificación automática del pago
     is_auto_verify = method.get("auto_verify", False)
+    sendhook_bank = _get_destination_bank_slug(supabase, payment_method_id) if is_auto_verify else None
 
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
-        amount_local, receipt_path, origin_bank, payer_id_number,
-        payer_phone, payment_date
+        amount_local, sendhook_bank, payer_phone,
     )
 
     if approved_payment:

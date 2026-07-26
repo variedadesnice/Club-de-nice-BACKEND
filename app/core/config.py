@@ -10,7 +10,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     redis_url: str = ""
     port: int = 8000
-    payment_verification_url: str = "https://api.tu-marca.com/api/v1/recibir-pago"
+    sendhook_api_url: str = ""
+    sendhook_api_key: str = ""
 
     # Email — Resend
     resend_api_key: str = ""
