@@ -202,6 +202,11 @@ def _verify_payment_automatically(
 
     logger.info("[verify_auto] Iniciando para payment_id=%s banco=%s referencia=%s", payment_id, sendhook_bank, reference_number)
 
+    # TEMPORAL (pruebas): SendHook solo tiene pagos de prueba por Bs. 1.00 registrados
+    # del lado del banco, así que forzamos monto=1.00 en vez del amount_local real.
+    # Quitar este override cuando se pase a monto real.
+    amount_local = 1.00
+
     # `contraparte` y `referencia` se filtran combinados (AND) en SendHook, y
     # BNC/BDV guardan el teléfono enmascarado (ej. "0424***1486") — nuestro
     # teléfono sin enmascarar nunca matchea ahí como substring. Como
