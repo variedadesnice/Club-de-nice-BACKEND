@@ -87,6 +87,7 @@ app/
 ```
 /api/auth  /api/posts  /api/courses  /api/tags  /api/invitations  /api/payments
 /api/payment-methods  /api/admin/payment-methods
+/api/plans  /api/admin/plans
 /api/levels  /api/achievements  /api/admin/levels  /api/admin/achievements
 /api/admin/analytics
 /api/classroom  /api/admin/classroom
@@ -148,7 +149,7 @@ Unchanged from the original social-feed design. **Always query `posts_view` for 
 |--------|------|-------|
 | `id` | UUID PK | |
 | `user_id` | UUID FK → profiles | |
-| `plan` | text | `"1m"` \| `"3m"` \| `"6m"` \| `"1y"` \| `"indefinido"` |
+| `plan` | text | Code of a row in `plans` (e.g. `"1m"`, `"1y"`, or any custom code an admin created) — no longer a fixed DB-level set, see `plans` below |
 | `amount` | numeric | USD amount, base currency for internal reporting |
 | `amount_local` | numeric | Amount in the local currency the user actually paid (e.g. Bs) |
 | `currency_id` | UUID FK → currencies | Currency the user paid in |
@@ -166,13 +167,20 @@ Unchanged from the original social-feed design. **Always query `posts_view` for 
 | `payer_phone` | text, nullable | Payer's Pago Móvil phone number. Renamed from `telefono_pagador`. |
 | `payment_date` | date, nullable | Date the user claims to have paid, as entered on the form. |
 
-**Plan durations**: `1m` = 30 d · `3m` = 90 d · `6m` = 180 d · `1y` = 365 d · `indefinido` = NULL
+**Plan durations (since 2026-07-30)**: come from the `plans` table (admin-configurable via `/api/admin/plans`), not a hardcoded dict. `duration_days = NULL` means "indefinido" (no expiry). Seeded rows: `1m`=30d/$25 (active), `3m`=90d (inactive, price placeholder), `6m`=180d (inactive, price placeholder), `1y`=365d/$197 (active), `indefinido`=NULL (inactive, price placeholder) — matches the two plans previously hardcoded in the frontend (`1m`, `1y`); the rest exist as inactive placeholders preserving old plan codes that may appear on historical payments.
 
 **Automatic Pago Móvil verification (SendHook, since 2026-07-26)**: if `SENDHOOK_API_URL`/`SENDHOOK_API_KEY` are configured and the selected `payment_methods.auto_verify` is `true` (the DB flag alone), `_verify_payment_automatically()` in `app/services/payments.py` POSTs `{monto, banco, referencia, contraparte?}` (`X-API-Key` header) to `{SENDHOOK_API_URL}/pagos/verificar`.
 
 > ⚠️ **`banco` is the destination bank, not the sender's bank.** SendHook's phone is logged into *El Club de Nice's own* receiving account — `banco` must identify which of *our* accounts got the money, never `payments.origin_bank` (that column is the payer's sending bank, entered by the user, kept only for display/manual review). The destination bank is resolved by `_get_destination_bank_slug()`: it reads the value of whichever `payment_method_fields` row has `field_label == "Banco"` for that payment method (the same admin-configured display field users see at checkout, e.g. value `"BNC"` or `"Banco de Venezuela"`) and normalizes free text to SendHook's slug (`bdv`/`bnc`/`bfc`/`binance`) via `_normalize_sendhook_bank_label()`. To change which bank auto-verify targets (e.g. switch the business's receiving account from BNC to BDV), just edit that field's value in the payment method's config (admin panel `PUT /api/admin/payment-methods/{id}/values`, or directly in `payment_method_values`) — no code change or redeploy needed. If that value doesn't resolve to a bank SendHook supports (e.g. Banesco), verification is skipped silently and the payment stays `"pending"`.
 
 On `{verificado: true}`, the payment is approved immediately (same as an admin approval); anything else leaves it `"pending"` for manual review. No receipt/cédula/fecha is sent — SendHook matches purely on amount + bank + reference (or counterpart phone/name, normalized to local `0XXXXXXXXXX` format by `_normalize_phone_for_verification()`, which is defensive against double-prefixed phone bugs like `+5804243771486`). `GET /api/payments/diagnostic-ip` (public) reports the backend's outbound IP — leftover from the previous verification provider, likely no longer needed for SendHook whitelisting.
+
+### `plans`
+Admin-configurable subscription plan catalog (since 2026-07-30) — replaces the old hardcoded `1m`/`3m`/`6m`/`1y`/`indefinido` set. `id`, `code` (unique, normalized lowercase — this is the value stored in `payments.plan`), `name` (display name), `sublabel` (nullable), `duration_days` (nullable — `NULL` = indefinido, no expiry), `price_usd`, `is_active`, `sort_order`, `created_at`, `updated_at`. RLS enabled, no policies (service-role only, same as every other table).
+
+`register_with_payment()`/`renew_subscription()` validate the submitted `plan` code exists and `is_active` via `plans_service.validate_active_plan()` before creating the payment. `approve_payment()` reads `duration_days` via `plans_service.get_plan_duration_days()` to compute `expires_at` — this is the only place plan duration is resolved; there is no more in-code `_PLAN_DAYS` dict. **`payments.plan` has no DB-level CHECK constraint anymore** (dropped 2026-07-30, it used to hardcode the old 5-value set) — any code that exists as an active row in `plans` is valid.
+
+Frontend (`Register.tsx`/`RenewalGateway.tsx`) fetches `GET /api/plans/` instead of a hardcoded `PLAN_OPTIONS` array, and computes the Bs. amount from `price_usd × bcvRate` client-side.
 
 ### `currencies`
 `id`, `code` (unique, normalized uppercase), `name`, `symbol`, `is_base` (bool — the USD/base row, can't be deleted or deactivated), `is_active`, `created_at`, `updated_at`
@@ -560,6 +568,20 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 | POST | `/api/admin/payment-methods/{method_id}/fields` | `{field_key, field_label, field_type, is_required?, sort_order?}` | Field (201) |
 | PATCH | `/api/admin/payment-methods/{method_id}/fields/{field_id}` | `{...}` | Field |
 | DELETE | `/api/admin/payment-methods/{method_id}/fields/{field_id}` | — | `{deleted: true}` |
+
+### Plans (`/api/plans`, public read)
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plans/` | Active plans, ordered by sort_order |
+
+### Plans — admin (`/api/admin/plans`, 👑)
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| GET | `/api/admin/plans/` | — | All plans (active + inactive) |
+| POST | `/api/admin/plans/` | `{code, name, sublabel?, duration_days?, price_usd, is_active?, sort_order?}` | Plan (201, 409 if code duplicate) |
+| PATCH | `/api/admin/plans/{plan_id}` | `{code?, name?, sublabel?, duration_days?, price_usd?, sort_order?}` | Plan |
+| PATCH | `/api/admin/plans/{plan_id}/toggle` | — | Plan |
+| DELETE | `/api/admin/plans/{plan_id}` | — | `{deleted: true}` (409 if has payments) |
 
 ### Currencies (`/api/currencies`, public read)
 | Method | Path | Returns |

@@ -1,8 +1,11 @@
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
-PlanType = Literal["1m", "3m", "6m", "1y", "indefinido"]
+# Código de un plan activo en la tabla `plans` (admin-configurable desde
+# /api/admin/plans) — ya no es un set fijo, se valida contra la tabla en
+# el service (plans_service.validate_active_plan).
+PlanType = str
 
 
 class UploadReceiptRequest(BaseModel):
@@ -15,7 +18,7 @@ class RegisterWithPaymentRequest(BaseModel):
     name: str = Field(..., min_length=1)
     email: str
     password: str = Field(..., min_length=6, description="Mínimo 6 caracteres")
-    plan: PlanType
+    plan: PlanType = Field(..., min_length=1)
     amount: float = Field(..., gt=0, description="Monto en USD (base para reportes)")
     payment_method_id: str = Field(..., min_length=1)
     reference_number: str = Field(..., min_length=1)
@@ -31,7 +34,7 @@ class RegisterWithPaymentRequest(BaseModel):
 
 
 class RenewSubscriptionRequest(BaseModel):
-    plan: PlanType
+    plan: PlanType = Field(..., min_length=1)
     amount: float = Field(..., gt=0, description="Monto en USD (base para reportes)")
     payment_method_id: str = Field(..., min_length=1)
     reference_number: str = Field(..., min_length=1)

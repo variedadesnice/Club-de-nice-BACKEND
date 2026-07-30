@@ -2,6 +2,8 @@ import base64
 import json
 import logging
 import re
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -11,10 +13,10 @@ from app.core.config import get_settings
 from app.core.deps import invalidate_profile_cache
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
+from app.services import plans as plans_service
 
 logger = logging.getLogger(__name__)
 
-_PLAN_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365}
 _RECEIPT_BUCKET = "receipts"
 _SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
@@ -162,6 +164,69 @@ def _build_verify_payload_json(amount_local: float, banco: str, referencia: str,
     return f'{{"monto": {monto_literal}, {rest_json}'
 
 
+# Reintentos en background tras el primer intento fallido, por si el SMS/
+# notificación todavía no había llegado a SendHook. Los primeros 3 (20s,
+# 30s, 30s) cubren el caso rápido; el último (300s = 5 min) le da margen
+# real al teléfono/app de SendHook para procesar la notificación en casos
+# más lentos antes de rendirse y dejar el pago "pending" para revisión manual.
+_RETRY_DELAYS_SECONDS = [20, 30, 30, 300]
+
+
+def _call_sendhook_verify(
+    base_url: str, api_key: str, amount_local: float, sendhook_bank: str,
+    reference_number: str, contraparte: Optional[str],
+) -> Optional[dict]:
+    """Un solo POST a /pagos/verificar. Devuelve el JSON de respuesta si status 200, None si falla."""
+    raw_body = _build_verify_payload_json(amount_local, sendhook_bank, reference_number, contraparte)
+    try:
+        import httpx
+        url = f"{base_url.rstrip('/')}/pagos/verificar"
+        logger.info("[verify_auto] Enviando solicitud a %s body=%s", url, raw_body)
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.post(
+                url, content=raw_body.encode("utf-8"),
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            )
+            logger.info("[verify_auto] Respuesta status=%d", resp.status_code)
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("[verify_auto] SendHook respondió %d: %s", resp.status_code, resp.text)
+    except Exception as exc:
+        logger.exception("[verify_auto] Error en verificación automática: %s", exc)
+    return None
+
+
+def _retry_verification_in_background(
+    payment_id: str, base_url: str, api_key: str, amount_local: float,
+    sendhook_bank: str, reference_number: str, contraparte: Optional[str],
+) -> None:
+    """Reintenta /pagos/verificar unas pocas veces más (hilo daemon, no bloquea
+    la request original). Antes de cada intento chequea que el pago siga
+    'pending' — si un admin ya lo aprobó/rechazó a mano, corta."""
+    supabase = get_supabase()
+    for delay in _RETRY_DELAYS_SECONDS:
+        time.sleep(delay)
+        try:
+            current = supabase.table("payments").select("status").eq("id", payment_id).maybe_single().execute()
+        except Exception as exc:
+            logger.warning("[verify_auto.retry] status check FAILED payment_id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
+            continue
+        if not current.data or current.data.get("status") != "pending":
+            logger.info("[verify_auto.retry] payment_id=%s ya no está pending, deteniendo reintentos.", payment_id)
+            return
+
+        data = _call_sendhook_verify(base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte)
+        if data and data.get("verificado") is True:
+            logger.info("[verify_auto.retry] Pago verificado por SendHook en reintento (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
+            try:
+                approve_payment(payment_id)
+            except HTTPException as exc:
+                logger.warning("[verify_auto.retry] approve_payment falló payment_id=%s: %s", payment_id, exc.detail)
+            return
+
+    logger.info("[verify_auto.retry] payment_id=%s sin match tras los reintentos, queda pending para revisión manual.", payment_id)
+
+
 def _verify_payment_automatically(
     payment_id: str,
     method_auto_verify: bool,
@@ -173,11 +238,12 @@ def _verify_payment_automatically(
 ) -> Optional[dict]:
     """
     Llama a la API de SendHook (POST /pagos/verificar) para verificar un pago
-    móvil automáticamente. Si SendHook responde verificado=true, aprueba el
-    pago inmediatamente y devuelve el registro aprobado. Si falla por
-    cualquier motivo (no configurado, banco destino no soportado, sin match,
-    error de red), devuelve None y el pago queda en 'pending' para revisión
-    manual.
+    móvil automáticamente. Si SendHook responde verificado=true en el primer
+    intento, aprueba el pago inmediatamente y devuelve el registro aprobado.
+    Si no (SMS/notificación todavía no había llegado a SendHook), agenda unos
+    reintentos en background (_retry_verification_in_background) y devuelve
+    None de inmediato — la request de registro/renovación no espera por eso;
+    si un reintento posterior matchea, aprueba el pago ahí mismo.
 
     `sendhook_bank` es el banco RECEPTOR (la cuenta de El Club de Nice a la
     que el teléfono con la app SendHook está escuchando) — no el banco emisor
@@ -218,31 +284,18 @@ def _verify_payment_automatically(
     if not reference_number:
         target_phone = payer_phone if payer_phone else phone
         contraparte = _normalize_phone_for_verification(target_phone) if target_phone else None
-    raw_body = _build_verify_payload_json(amount_local, sendhook_bank, reference_number, contraparte)
 
-    try:
-        import httpx
-        url = f"{base_url.rstrip('/')}/pagos/verificar"
-        logger.info("[verify_auto] Enviando solicitud a %s body=%s", url, raw_body)
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.post(
-                url, content=raw_body.encode("utf-8"),
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            )
-            logger.info("[verify_auto] Respuesta status=%d", resp.status_code)
+    data = _call_sendhook_verify(base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte)
+    if data and data.get("verificado") is True:
+        logger.info("[verify_auto] Pago verificado por SendHook (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
+        return approve_payment(payment_id)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("verificado") is True:
-                    logger.info("[verify_auto] Pago verificado por SendHook (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
-                    return approve_payment(payment_id)
-                else:
-                    logger.info("[verify_auto] SendHook no encontró match. Respuesta: %s", data)
-            else:
-                logger.warning("[verify_auto] SendHook respondió %d: %s", resp.status_code, resp.text)
-
-    except Exception as exc:
-        logger.exception("[verify_auto] Error en verificación automática: %s", exc)
+    logger.info("[verify_auto] Sin match en el primer intento, agendando reintentos en background para payment_id=%s.", payment_id)
+    threading.Thread(
+        target=_retry_verification_in_background,
+        args=(payment_id, base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte),
+        daemon=True,
+    ).start()
 
     return None
 
@@ -272,7 +325,8 @@ def register_with_payment(
     logger.info("[payments.register] start - email=%s plan=%s", email, plan)
     supabase = get_supabase()
 
-    # 0. Validar que el método de pago exista y esté activo
+    # 0. Validar que el plan y el método de pago existan y estén activos
+    plans_service.validate_active_plan(supabase, plan)
     try:
         method_resp = (
             supabase.table("payment_methods")
@@ -509,9 +563,12 @@ def list_payments() -> list:
         row["user_name"] = profile.get("name")
 
         user_id = row.get("user_id")
-        if user_id not in email_cache:
+        # user_id puede ser NULL: pagos de registro rechazados cuya cuenta
+        # se eliminó, desvinculados a propósito (ver reject_payment) para
+        # quedar como registro histórico sin apuntar a un usuario inexistente.
+        if user_id and user_id not in email_cache:
             email_cache[user_id] = _get_user_email(supabase, user_id)
-        row["user_email"] = email_cache[user_id]
+        row["user_email"] = email_cache.get(user_id)
 
     logger.info("[payments.list] returned %d items", len(rows))
     return rows
@@ -556,13 +613,11 @@ def get_user_payments(user_id: str, requester_id: str) -> list:
 # Aprobación / rechazo (admin)
 # ---------------------------------------------------------------------------
 
-def _compute_expires_at(plan: str, from_dt: datetime) -> Optional[str]:
-    if plan == "indefinido":
+def _compute_expires_at(supabase, plan: str, from_dt: datetime) -> Optional[str]:
+    duration_days = plans_service.get_plan_duration_days(supabase, plan)
+    if duration_days is None:
         return None
-    days = _PLAN_DAYS.get(plan)
-    if days is None:
-        raise HTTPException(status_code=400, detail=f"Plan desconocido: {plan}")
-    return (from_dt + timedelta(days=days)).isoformat()
+    return (from_dt + timedelta(days=duration_days)).isoformat()
 
 
 def approve_payment(payment_id: str) -> dict:
@@ -586,7 +641,7 @@ def approve_payment(payment_id: str) -> dict:
         raise HTTPException(status_code=400, detail=f"Este pago ya fue procesado (estado actual: {payment['status']}).")
 
     now = datetime.now(timezone.utc)
-    expires_at = _compute_expires_at(payment["plan"], now)
+    expires_at = _compute_expires_at(supabase, payment["plan"], now)
 
     try:
         result = (
@@ -626,8 +681,18 @@ def reject_payment(payment_id: str) -> dict:
     Admin rechaza un pago: status -> 'failed'. El trigger de Supabase deja
     profiles.subscription_status como corresponda (no se modifica manualmente).
 
+    Si este era el ÚNICO pago que tuvo el usuario (nunca tuvo uno aprobado
+    antes), significa que era su pago de registro — la cuenta se elimina
+    (perfil + usuario de Auth) para liberar el email y que la persona pueda
+    volver a registrarse con datos corregidos. La fila de payments NO se
+    borra: se desvincula (user_id -> NULL) y queda como registro histórico
+    en el panel admin (referencia/monto/teléfono siguen visibles, para
+    detectar abuso o resolver reclamos), ya sin ligarla a ninguna cuenta.
+    Si el usuario ya tenía otros pagos (ej. una renovación rechazada de una
+    cuenta activa o expirada), la cuenta NUNCA se toca.
+
     Returns:
-        El registro de pago actualizado.
+        El registro de pago actualizado (aunque la cuenta se haya eliminado).
     Raises:
         HTTPException 404 — pago no encontrado
         HTTPException 400 — el pago ya fue procesado anteriormente
@@ -655,9 +720,35 @@ def reject_payment(payment_id: str) -> dict:
     if not result.data:
         raise HTTPException(status_code=500, detail="No se pudo actualizar el pago.")
 
+    rejected = result.data[0]
     invalidate_profile_cache(payment["user_id"])
     logger.info("[payments.reject] OK payment_id=%s", payment_id)
-    return result.data[0]
+
+    try:
+        other_payments = (
+            supabase.table("payments")
+            .select("id")
+            .eq("user_id", payment["user_id"])
+            .neq("id", payment_id)
+            .limit(1)
+            .execute()
+        )
+        if not other_payments.data:
+            user_id = payment["user_id"]
+            logger.info("[payments.reject] Único pago del usuario (era el de registro) — eliminando cuenta user_id=%s", user_id)
+            try:
+                supabase.table("payments").update({"user_id": None}).eq("id", payment_id).execute()
+            except Exception as exc:
+                # Si payments.user_id no admite NULL, no queda otra que borrar
+                # la fila — mejor eso que dejar el pago apuntando a una cuenta
+                # que ya no existe.
+                logger.warning("[payments.reject] No se pudo desvincular el pago (¿user_id NOT NULL?), se borra la fila id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
+                supabase.table("payments").delete().eq("id", payment_id).execute()
+            _cleanup_failed_registration(supabase, user_id)
+    except Exception as exc:
+        logger.warning("[payments.reject] No se pudo verificar/eliminar la cuenta tras el rechazo user_id=%s [%s] %s", payment["user_id"], type(exc).__name__, supabase_error(exc))
+
+    return rejected
 
 
 def renew_subscription(
@@ -674,7 +765,8 @@ def renew_subscription(
     logger.info("[payments.renew] start - user_id=%s plan=%s", user_id, plan)
     supabase = get_supabase()
 
-    # 0. Validar que el método de pago exista y esté activo
+    # 0. Validar que el plan y el método de pago existan y estén activos
+    plans_service.validate_active_plan(supabase, plan)
     try:
         method_resp = (
             supabase.table("payment_methods")
