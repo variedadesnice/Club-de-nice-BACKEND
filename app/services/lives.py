@@ -355,12 +355,30 @@ def admin_delete_live(live_id: str) -> dict:
     supabase = get_supabase()
     _get_live_or_404(supabase, live_id)
 
+    # Las filas hijas se borran explícitamente: si alguna FK no tiene ON DELETE
+    # CASCADE, el DELETE de live_sessions falla por violación de clave foránea.
+    for table, label in (
+        ("live_reactions", "reacciones"),
+        ("live_pdfs", "PDFs"),
+        ("live_chat_messages", "mensajes"),
+    ):
+        try:
+            supabase.table(table).delete().eq("live_id", live_id).execute()
+        except Exception as exc:
+            msg = supabase_error(exc)
+            logger.error("[lives.admin_delete_live] %s delete FAILED [%s] %s", table, type(exc).__name__, msg, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Error al eliminar {label}: {msg}")
+
+    # Limpieza best-effort del bucket: un fallo aquí deja archivos huérfanos,
+    # pero no debe impedir que se borre la transmisión.
     try:
-        supabase.table("live_chat_messages").delete().eq("live_id", live_id).execute()
+        objects = supabase.storage.from_("live-pdfs").list(live_id) or []
+        paths = [f"{live_id}/{o['name']}" for o in objects if o.get("name")]
+        if paths:
+            supabase.storage.from_("live-pdfs").remove(paths)
     except Exception as exc:
-        msg = supabase_error(exc)
-        logger.error("[lives.admin_delete_live] chat delete FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error al eliminar mensajes: {msg}")
+        logger.warning("[lives.admin_delete_live] storage cleanup fallido live_id=%s [%s] %s",
+                       live_id, type(exc).__name__, exc)
 
     try:
         supabase.table("live_sessions").delete().eq("id", live_id).execute()
@@ -369,6 +387,7 @@ def admin_delete_live(live_id: str) -> dict:
         logger.error("[lives.admin_delete_live] FAILED [%s] %s", type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error al eliminar transmisión: {msg}")
 
+    cache_delete(_LIVES_KEY)
     logger.info("[lives.admin_delete_live] OK live_id=%s", live_id)
     return {"deleted": True}
 
