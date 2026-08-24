@@ -6,6 +6,7 @@ from app.api.admin_currencies import router as admin_currencies_router
 from app.api.admin_classroom import router as admin_classroom_router
 from app.api.admin_gamification import admin_achievements_router, admin_levels_router
 from app.api.admin_lives import router as admin_lives_router
+from app.api.admin_members import router as admin_members_router
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.classroom import router as classroom_router
@@ -44,6 +45,7 @@ api_router.include_router(achievements_router, prefix="/achievements", tags=["ac
 api_router.include_router(admin_levels_router, prefix="/admin/levels", tags=["admin-levels"])
 api_router.include_router(admin_achievements_router, prefix="/admin/achievements", tags=["admin-achievements"])
 api_router.include_router(analytics_router, prefix="/admin/analytics", tags=["admin-analytics"])
+api_router.include_router(admin_members_router, prefix="/admin/members", tags=["admin-members"])
 api_router.include_router(classroom_router, prefix="/classroom", tags=["classroom"])
 api_router.include_router(admin_classroom_router, prefix="/admin/classroom", tags=["admin-classroom"])
 api_router.include_router(lives_router, prefix="/lives", tags=["lives"])

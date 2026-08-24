@@ -664,6 +664,15 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 
 Reads Supabase views `v_stats_members`, `v_stats_revenue`, `v_analytics_history`. Results are cached in Redis with short TTLs (30–300s) to amortize parallel admin-panel requests.
 
+**Base activa (2026-08-24)**: los totales y la demografía ya **no** salen de `v_stats_locations` / `v_stats_ages` — se calculan en Python (`_active_base_demographics`) sobre `profiles`, porque esas vistas cuentan todos los perfiles y el panel debe reflejar solo la base activa. `_is_active_member()` define esa base: `role IN ('miembro','invitado')` con acceso vigente, sin admins (espeja `needsActiveSubscription` + `hasActiveSubscription` del frontend). `members.total` es la base activa y `total_all` el conteo crudo. El desglose por estado (`active`/`inactive`/`expired`/`invited`) sigue viniendo de `v_stats_members` y cuenta a todos **a propósito**. `_fetch_all_profiles` pagina de a 1000 porque PostgREST corta ahí.
+
+### Admin Members (`/api/admin/members`, 👑)
+| Method | Path | Params | Returns |
+|--------|------|--------|---------|
+| GET | `/api/admin/members/` | — | `{members: [...], summary: {total, active, expiring_soon, expired, inactive, exempt}}` |
+
+`access_state` es **calculado**, no leído de `profiles.subscription_status`: el trigger `sync_subscription_status` solo corre al escribir en `payments`, así que una suscripción puede estar vencida por el paso del tiempo con el perfil aún en `active`. Por eso `expires_at` manda sobre el estado guardado — ver `_access_state()` en `app/services/members.py`. `expires_at` sale del pago aprobado más lejano de cada usuario, resuelto con **una** query (`_fetch_expiry_map`) en vez de una por usuario como hace `auth._get_subscription_expires_at`; los emails con un solo `auth.admin.list_users()`.
+
 ### Raffles — admin (`/api/admin/raffles`, 👑)
 | Method | Path | Body | Returns |
 |--------|------|------|---------|
