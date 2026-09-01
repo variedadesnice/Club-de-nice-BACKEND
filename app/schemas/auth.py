@@ -1,6 +1,10 @@
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# /register es público: nunca debe poder auto-asignarse "admin".
+ALLOWED_ROLES = {"miembro", "invitado"}
 
 
 class RegisterRequest(BaseModel):
@@ -8,6 +12,16 @@ class RegisterRequest(BaseModel):
     email: str
     password: str = Field(..., min_length=6, description="Mínimo 6 caracteres")
     role: str = Field(default="miembro")
+
+    @field_validator("role")
+    @classmethod
+    def normalize_role(cls, v: str) -> str:
+        # Los gates de suscripción (deps.get_active_user y permissions.ts) comparan
+        # contra roles en minúscula — un "Invitado" con mayúscula rompe la exención.
+        role = (v or "").strip().lower()
+        if role not in ALLOWED_ROLES:
+            raise ValueError(f"Rol inválido: {v}")
+        return role
 
 
 class LoginRequest(BaseModel):
