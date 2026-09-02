@@ -719,6 +719,16 @@ def reject_payment(payment_id: str) -> dict:
     invalidate_profile_cache(payment["user_id"])
     logger.info("[payments.reject] OK payment_id=%s", payment_id)
 
+    # Se lee AHORA, antes de que _cleanup_failed_registration borre el usuario
+    # de Auth: después de eso el email ya no se puede recuperar.
+    user_email = _get_user_email(supabase, payment["user_id"])
+    try:
+        profile_resp = supabase.table("profiles").select("name").eq("id", payment["user_id"]).maybe_single().execute()
+        user_name = (profile_resp.data or {}).get("name") or "miembro"
+    except Exception:
+        user_name = "miembro"
+    account_deleted = False
+
     try:
         other_payments = (
             supabase.table("payments")
@@ -740,8 +750,20 @@ def reject_payment(payment_id: str) -> dict:
                 logger.warning("[payments.reject] No se pudo desvincular el pago (¿user_id NOT NULL?), se borra la fila id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
                 supabase.table("payments").delete().eq("id", payment_id).execute()
             _cleanup_failed_registration(supabase, user_id)
+            account_deleted = True
     except Exception as exc:
         logger.warning("[payments.reject] No se pudo verificar/eliminar la cuenta tras el rechazo user_id=%s [%s] %s", payment["user_id"], type(exc).__name__, supabase_error(exc))
+
+    # Fire-and-forget: avisar del rechazo. El texto cambia según si la cuenta
+    # sobrevivió (renovación) o se eliminó (pago de registro).
+    try:
+        from app.services import email as email_service
+        if user_email:
+            email_service.send_payment_rejected(user_email, user_name, account_deleted)
+        else:
+            logger.warning("[payments.reject] sin email para user_id=%s, no se notifica el rechazo", payment["user_id"])
+    except Exception as exc:
+        logger.warning("[payments.reject] rejection email failed: %s", exc)
 
     return rejected
 

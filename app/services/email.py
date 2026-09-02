@@ -1,11 +1,15 @@
 """
 Email service — todas las comunicaciones transaccionales a través de Resend.
 
-Cada función send_* es fire-and-forget: si el envío falla, loguea el error
-pero nunca propaga la excepción para no bloquear la operación principal.
+Cada función send_* devuelve True si el correo salió y False si falló o si
+Resend no está configurado. Nunca propagan excepciones, para no tumbar la
+operación principal por un fallo de correo.
+
+Los envíos son síncronos a propósito: el backend corre en Vercel Functions,
+que congela la ejecución en cuanto se devuelve la respuesta HTTP. Un envío
+en un hilo de fondo se perdería sin dejar rastro.
 """
 import logging
-import threading
 from datetime import date, timedelta
 from typing import Optional
 
@@ -104,11 +108,6 @@ def _send(to: str, subject: str, html: str) -> bool:
         return False
 
 
-def _send_async(to: str, subject: str, html: str) -> None:
-    """Fire-and-forget: envía en un hilo daemon para no bloquear la request."""
-    threading.Thread(target=_send, args=(to, subject, html), daemon=True).start()
-
-
 # ─── Plantillas de email ─────────────────────────────────────────────────────
 
 def _welcome_html(name: str) -> str:
@@ -121,6 +120,39 @@ def _welcome_html(name: str) -> str:
         + _p('Si tienes alguna pregunta, no dudes en escribirnos.')
     )
     return _base(f"¡Bienvenido/a al Club, {name}!", body)
+
+
+def _invitation_html(invite_link: str) -> str:
+    body = (
+        _h1("Has sido invitado/a 🎟️")
+        + _p("Alguien del equipo de <strong>El Club de Nice</strong> te reservó un lugar en la comunidad. "
+             "El acceso es solo por invitación, y esta es la tuya.")
+        + _btn("Completar mi registro", invite_link)
+        + _p("El enlace ya trae tu email vinculado — solo tienes que elegir tu nombre y contraseña.")
+        + f'<p style="margin:0;color:#94a3b8;font-size:12px;word-break:break-all;">Si el botón no funciona, copia este enlace: {invite_link}</p>'
+    )
+    return _base("Tu invitación a El Club de Nice", body)
+
+
+def _payment_rejected_html(name: str, account_deleted: bool) -> str:
+    s = get_settings()
+    if account_deleted:
+        detail = _p(
+            "Revisamos tu comprobante y no pudimos validarlo, así que tu registro no se completó. "
+            "Puedes volver a registrarte con los datos corregidos — el email queda libre de nuevo."
+        ) + _btn("Registrarme de nuevo", s.app_url, "#0f172a")
+    else:
+        detail = _p(
+            "Revisamos tu comprobante y no pudimos validarlo, por lo que tu suscripción sigue sin renovarse. "
+            "Verifica los datos de tu transferencia y envía un comprobante nuevo."
+        ) + _btn("Enviar otro comprobante", f"{s.app_url}/renovar", "#0f172a")
+    body = (
+        _h1("No pudimos validar tu pago")
+        + _p(f"Hola <strong>{name}</strong>:")
+        + detail
+        + _p("Si crees que se trata de un error, responde a este correo y lo revisamos contigo.")
+    )
+    return _base("No pudimos validar tu pago", body)
 
 
 def _payment_approved_html(name: str, plan: str, expires_at: Optional[str]) -> str:
@@ -197,39 +229,55 @@ def _expired_html(name: str) -> str:
 
 # ─── API pública de envío ────────────────────────────────────────────────────
 
-def send_welcome(to: str, name: str) -> None:
+def send_welcome(to: str, name: str) -> bool:
     """Bienvenida tras registro estándar o invitación."""
-    _send_async(to, f"¡Bienvenido/a a El Club de Nice, {name}!", _welcome_html(name))
+    return _send(to, f"¡Bienvenido/a a El Club de Nice, {name}!", _welcome_html(name))
 
 
-def send_payment_approved(to: str, name: str, plan: str, expires_at: Optional[str]) -> None:
+def send_invitation(to: str, invite_link: str) -> bool:
+    """Enlace de registro enviado al crear una invitación desde el panel admin."""
+    return _send(to, "Tu invitación a El Club de Nice 🎟️", _invitation_html(invite_link))
+
+
+def send_payment_approved(to: str, name: str, plan: str, expires_at: Optional[str]) -> bool:
     """Confirmación de pago aprobado y suscripción activa."""
-    _send_async(to, "¡Tu pago fue aprobado! Ya tienes acceso al Club", _payment_approved_html(name, plan, expires_at))
+    return _send(to, "¡Tu pago fue aprobado! Ya tienes acceso al Club", _payment_approved_html(name, plan, expires_at))
 
 
-def send_password_reset(to: str, name: str, reset_link: str) -> None:
+def send_payment_rejected(to: str, name: str, account_deleted: bool) -> bool:
+    """
+    Aviso de comprobante rechazado.
+
+    `account_deleted` distingue los dos caminos de payments.reject_payment: si
+    era el pago de registro, la cuenta se borró y toca registrarse de nuevo; si
+    era una renovación, la cuenta sigue viva y solo hace falta otro comprobante.
+    """
+    return _send(to, "No pudimos validar tu pago — El Club de Nice", _payment_rejected_html(name, account_deleted))
+
+
+def send_password_reset(to: str, name: str, reset_link: str) -> bool:
     """Enlace de restablecimiento de contraseña generado via Supabase admin."""
-    _send(to, "Restablece tu contraseña — El Club de Nice", _password_reset_html(name, reset_link))
+    return _send(to, "Restablece tu contraseña — El Club de Nice", _password_reset_html(name, reset_link))
 
 
-def send_renewal_reminder(to: str, name: str, days_left: int, expires_date: str) -> None:
+def send_renewal_reminder(to: str, name: str, days_left: int, expires_date: str) -> bool:
     """Aviso de renovación (5 días o 1 día antes)."""
     subject = (
         "¡Tu suscripción vence mañana! — El Club de Nice"
         if days_left <= 1
         else f"Tu suscripción vence en {days_left} días — El Club de Nice"
     )
-    _send(to, subject, _renewal_reminder_html(name, days_left, expires_date))
+    return _send(to, subject, _renewal_reminder_html(name, days_left, expires_date))
 
 
-def send_expired_notice(to: str, name: str) -> None:
+def send_expired_notice(to: str, name: str) -> bool:
     """Aviso de cuenta vencida."""
-    _send(to, "Tu suscripción ha vencido — El Club de Nice", _expired_html(name))
+    return _send(to, "Tu suscripción ha vencido — El Club de Nice", _expired_html(name))
 
 
-def send_raffle_winner(to: str, name: str, raffle_title: str) -> None:
+def send_raffle_winner(to: str, name: str, raffle_title: str) -> bool:
     """Notificación a un ganador de sorteo tras el draw."""
-    _send_async(to, f'¡Ganaste el sorteo "{raffle_title}"! 🎉', _raffle_winner_html(name, raffle_title))
+    return _send(to, f'¡Ganaste el sorteo "{raffle_title}"! 🎉', _raffle_winner_html(name, raffle_title))
 
 
 # ─── Lógica de recordatorios automáticos ─────────────────────────────────────

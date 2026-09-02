@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from app.core.config import get_settings
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
 
@@ -71,7 +72,19 @@ def create_invitation(email: str, invited_by: str) -> dict:
 
     row = result.data[0]
     row["status"] = _compute_status(row)
-    logger.info("[invitations.create] OK id=%s token=%s", row["id"], token)
+
+    # Fire-and-forget: el enlace de registro. Si el correo falla, la invitación
+    # sigue siendo válida — el admin la ve en el panel y puede pasar el link a mano.
+    invite_link = f"{get_settings().app_url}/invite?token={token}"
+    row["invite_link"] = invite_link
+    try:
+        from app.services import email as email_service
+        row["email_sent"] = email_service.send_invitation(email, invite_link)
+    except Exception as exc:
+        logger.warning("[invitations.create] invitation email failed for %s: %s", email, exc)
+        row["email_sent"] = False
+
+    logger.info("[invitations.create] OK id=%s token=%s email_sent=%s", row["id"], token, row["email_sent"])
     return row
 
 
