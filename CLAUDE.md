@@ -579,7 +579,7 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 |--------|------|------|---------|
 | GET | `/api/admin/plans/` | — | All plans (active + inactive) |
 | POST | `/api/admin/plans/` | `{code, name, sublabel?, duration_days?, price_usd, is_active?, sort_order?}` | Plan (201, 409 if code duplicate) |
-| PATCH | `/api/admin/plans/{plan_id}` | `{code?, name?, sublabel?, duration_days?, price_usd?, sort_order?}` | Plan |
+| PATCH | `/api/admin/plans/{plan_id}` | `{code?, name?, sublabel?, duration_days?, price_usd?, sort_order?}` | Plan — only the fields present in the body are touched (`exclude_unset`). Sending `null` clears `sublabel`/`duration_days` (`duration_days: null` = indefinido); a `null` on any other field is ignored rather than blanking the column. |
 | PATCH | `/api/admin/plans/{plan_id}/toggle` | — | Plan |
 | DELETE | `/api/admin/plans/{plan_id}` | — | `{deleted: true}` (409 if has payments) |
 

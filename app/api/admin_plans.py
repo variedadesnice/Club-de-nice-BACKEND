@@ -19,10 +19,18 @@ def admin_create_plan(body: PlanCreate, current_user: dict = Depends(get_current
     return plans_service.admin_create_plan(body.model_dump())
 
 
+# Columnas que aceptan NULL en la tabla: mandar null en el PATCH las limpia
+# (duration_days = null es "indefinido", sin vencimiento). El resto se ignora
+# si viene en null, para no vaciar por accidente un campo obligatorio.
+NULLABLE_FIELDS = {"sublabel", "duration_days"}
+
+
 @router.patch("/{plan_id}")
 def admin_update_plan(plan_id: str, body: PlanUpdate, current_user: dict = Depends(get_current_admin)):
-    """Admin — edita un plan existente."""
-    return plans_service.admin_update_plan(plan_id, body.model_dump(exclude_none=True))
+    """Admin — edita un plan existente. Solo toca los campos enviados."""
+    sent = body.model_dump(exclude_unset=True)
+    data = {k: v for k, v in sent.items() if v is not None or k in NULLABLE_FIELDS}
+    return plans_service.admin_update_plan(plan_id, data)
 
 
 @router.patch("/{plan_id}/toggle")
