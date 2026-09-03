@@ -662,7 +662,19 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 | GET | `/api/admin/analytics/history` | `?from_date&to_date&limit=30(max 365)` | Daily snapshots, newest first |
 | POST | `/api/admin/analytics/snapshot` | — | Forces today's snapshot generation/refresh |
 
-Reads Supabase views `v_stats_members`, `v_stats_revenue`, `v_analytics_history`. Results are cached in Redis with short TTLs (30–300s) to amortize parallel admin-panel requests.
+Results are cached in Redis with short TTLs (30–300s) to amortize parallel admin-panel requests.
+
+**Who gets counted (since 2026-09-03).** Member counts and demographics are computed in Python from `profiles`, not read from `v_stats_members` / `v_stats_locations` / `v_stats_ages` — those views count every profile, admins included, and they live only inside the Supabase project (see caveat 11), so changing them would mean applying SQL by hand in production. The rules, all in `app/services/analytics.py`:
+
+| Field | Population |
+|-------|-----------|
+| `total`, `active`, `inactive`, `expired`, `new_today`, `new_this_month` | `role = 'miembro'` only |
+| `invited` | count of `role = 'invitado'` — a bare number, never folded into any other counter |
+| `gender`, `locations`, `ages`, `demographics_base` | `role = 'miembro'` **and** `subscription_status = 'active'` |
+
+Admins are excluded everywhere. `_members_summary()` and `_members_demographics()` share one paginated `profiles` read (`_fetch_all_profiles`, 1000 rows/page — PostgREST's cap). City names are normalized with `title()` so "caracas" and "Caracas" don't split, and percentages are over the members who actually have the field so the slices sum to 100%. `v_stats_revenue` still backs the revenue figures: that comes from `payments`, so it's unaffected.
+
+> ⚠️ `analytics_daily_snapshots` does **not** follow these rules. Its rows are written by the Postgres function `generate_daily_snapshot()` (called by the `daily-analytics-snapshot` pg_cron job and by `POST /api/admin/analytics/snapshot`), which lives in Supabase and counts on its own criteria — `invited_members` there also compares role case-sensitively, so capitalized `"Invitado"` rows were missed. The history chart in the admin panel reads those rows, so it's on older criteria than the live figures. Fixing it means editing that SQL function in Supabase, or moving snapshot generation into Python.
 
 ### Raffles — admin (`/api/admin/raffles`, 👑)
 | Method | Path | Body | Returns |
@@ -825,4 +837,4 @@ Pattern: `[<module>.<function>] <context>`. Use `logger.info` for happy path, `l
 
 10. **`/api/classroom` progress-tracking endpoints exist but aren't fully wired into the UI** — `complete_chapter` / `get_course_progress` / `get_completed_courses_count` are implemented and used by `Profile.tsx` for the completed-courses count and by the achievement triggers, but `CourseDetail.tsx` on the frontend still reads the static `courses.progress` column rather than calling `get_course_progress`.
 
-11. **Supabase views aren't tracked anywhere in this repo** — `v_stats_members`, `v_stats_revenue`, `v_analytics_history`, `v_stats_ages` (used by `app/services/analytics.py`) live only in the Supabase project itself, no `.sql`/migration file backs them up. `v_stats_members` in particular had a real bug fixed 2026-07-08: its `gender` filters compared against lowercase `'masculino'`/`'femenino'`, but `profiles.gender` actually stores `"Masculino"`/`"Femenino"` (capitalized, per the frontend dropdown) — every row silently fell into the `gender_other` bucket. Fixed with `lower(gender) = 'masculino'/'femenino'`. If this view is ever recreated from an old backup/script, re-check that casing.
+11. **Supabase views aren't tracked anywhere in this repo** — `v_stats_members`, `v_stats_revenue`, `v_analytics_history`, `v_stats_ages` (only `v_stats_revenue` is still read by `app/services/analytics.py`; the member/demographic ones were replaced by Python counting, see Admin Analytics above) live only in the Supabase project itself, no `.sql`/migration file backs them up. `v_stats_members` in particular had a real bug fixed 2026-07-08: its `gender` filters compared against lowercase `'masculino'`/`'femenino'`, but `profiles.gender` actually stores `"Masculino"`/`"Femenino"` (capitalized, per the frontend dropdown) — every row silently fell into the `gender_other` bucket. Fixed with `lower(gender) = 'masculino'/'femenino'`. If this view is ever recreated from an old backup/script, re-check that casing.
