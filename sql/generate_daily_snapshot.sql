@@ -2,119 +2,82 @@
 -- generate_daily_snapshot() — snapshot diario de analítica
 -- =============================================================================
 --
--- Alinea el histórico con las reglas que ya aplica app/services/analytics.py
--- desde 2026-09-03:
+-- Reemplaza a la función que hay hoy en Supabase para que el histórico cuente
+-- igual que app/services/analytics.py desde 2026-09-03. Se aplica a mano en el
+-- editor SQL de Supabase.
 --
---   * Toda cifra de miembros mira solo role = 'miembro'. Los admins no se
---     cuentan en ningún contador.
---   * De los invitados solo se guarda cuántos hay, en invited_members. No
---     entran en total_members ni en new_members.
---   * La comparación de role es insensible a mayúsculas. La versión anterior
---     comparaba con '=', así que los perfiles guardados como "Invitado" con
---     mayúscula quedaban fuera de invited_members. El backend ya normaliza el
---     rol al registrar, pero lower() protege a las filas viejas.
+-- Lo que cambia respecto a la versión actual, y nada más:
 --
--- ANTES DE APLICARLO: volcá la definición actual y comparala con esta, porque
--- las columnas de pagos (payments_success/pending/failed, revenue_day,
--- revenue_month, non_renewals) se reconstruyeron a partir de los datos que hay
--- en la tabla, no de la función original:
+--   1. Los contadores de miembros salían de COUNT(*) sobre profiles entero, así
+--      que incluían admins e invitados. Ahora todos llevan
+--      FILTER (WHERE lower(trim(role)) = 'miembro').
+--   2. invited_members comparaba role = 'invitado' con distinción de mayúsculas.
+--      El registro por invitación guardaba "Invitado" capitalizado, así que esos
+--      perfiles no se contaban en ningún lado: ni como invitados ni como nada.
+--      El backend ya normaliza el rol al registrar, pero lower(trim()) protege a
+--      las filas viejas.
+--   3. non_renewals contaba los expirados de todos los perfiles; ahora solo los
+--      de rol miembro.
 --
---   SELECT pg_get_functiondef(oid)
---   FROM pg_proc
---   WHERE proname = 'generate_daily_snapshot';
+-- Todo lo demás se deja idéntico a propósito: RETURNS void, los nombres
+-- calificados con public., el ON CONFLICT, y las cinco subconsultas de pagos.
+-- Los ingresos salen de payments, así que no dependen del rol de nadie.
 --
--- El upsert necesita un índice único sobre snapshot_date. La función anterior ya
--- actualizaba la fila del día, así que debería existir; confirmalo con:
+-- ⚠️ NO cambies RETURNS void por otra cosa: CREATE OR REPLACE no puede cambiar
+-- el tipo de retorno de una función existente y fallaría con "cannot change
+-- return type of existing function". Habría que hacer DROP FUNCTION primero, y
+-- el job de pg_cron dejaría de existir mientras tanto.
 --
---   SELECT indexdef FROM pg_indexes
---   WHERE tablename = 'analytics_daily_snapshots';
+-- Esta función NO reescribe las filas ya guardadas: los snapshots anteriores al
+-- día en que la apliques conservan los criterios viejos. Solo se recalcula la
+-- fila de hoy, cada vez que corre.
 --
--- Si no está: CREATE UNIQUE INDEX ON analytics_daily_snapshots (snapshot_date);
---
--- Esta función NO toca las filas ya escritas: los snapshots anteriores a la
--- fecha en que la apliques siguen con los criterios viejos.
---
--- Lo llama el job de pg_cron `daily-analytics-snapshot` (3:30 AM UTC) y el
+-- La llaman el job de pg_cron `daily-analytics-snapshot` (3:30 AM UTC) y el
 -- endpoint POST /api/admin/analytics/snapshot.
+--
+-- ---------------------------------------------------------------------------
+-- Aparte, sin tocar en este cambio: payments_failed filtra por paid_at::date,
+-- pero paid_at solo se escribe al aprobar un pago, así que en un pago fallido
+-- queda NULL y ese contador da siempre 0. Si querés que cuente de verdad, el
+-- campo es created_at. Se deja como está porque no es parte de lo que se pidió
+-- y cambiarlo alteraría cifras de pagos, no de miembros.
 -- =============================================================================
 
-CREATE OR REPLACE FUNCTION generate_daily_snapshot()
-RETURNS analytics_daily_snapshots
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
+CREATE OR REPLACE FUNCTION public.generate_daily_snapshot()
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
 DECLARE
-  hoy           date := current_date;
-  inicio_mes    date := date_trunc('month', current_date)::date;
-  resultado     analytics_daily_snapshots;
+  v_date date := current_date;
 BEGIN
-  INSERT INTO analytics_daily_snapshots AS s (
-    snapshot_date,
-    total_members,
-    active_members,
-    inactive_members,
-    expired_members,
-    invited_members,
-    new_members,
-    revenue_day,
-    revenue_month,
-    payments_success,
-    payments_pending,
-    payments_failed,
-    non_renewals
+  INSERT INTO public.analytics_daily_snapshots (
+    snapshot_date, total_members, active_members, inactive_members, expired_members,
+    invited_members, new_members, revenue_day, revenue_month,
+    payments_success, payments_pending, payments_failed, non_renewals
   )
-  SELECT
-    hoy,
-    -- Miembros: solo role='miembro'. Sin admins, sin invitados.
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'),
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'
-        AND lower(trim(subscription_status)) = 'active'),
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'
-        AND lower(trim(subscription_status)) = 'inactive'),
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'
-        AND lower(trim(subscription_status)) = 'expired'),
+  SELECT v_date,
+    -- Miembros: solo role='miembro'. Los admins no se cuentan en ningún lado.
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro'),
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro' AND subscription_status = 'active'),
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro' AND subscription_status = 'inactive'),
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro' AND subscription_status = 'expired'),
     -- Invitados: solo el conteo, aparte de todo lo demás.
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'invitado'),
-    -- Altas de hoy, también solo miembros.
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'
-        AND created_at::date = hoy),
-    -- Ingresos: salen de payments, así que no dependen del rol del usuario.
-    (SELECT coalesce(sum(amount), 0) FROM payments
-      WHERE status = 'success' AND paid_at::date = hoy),
-    (SELECT coalesce(sum(amount), 0) FROM payments
-      WHERE status = 'success' AND paid_at::date >= inicio_mes),
-    (SELECT count(*) FROM payments
-      WHERE status = 'success' AND paid_at::date = hoy),
-    (SELECT count(*) FROM payments
-      WHERE status = 'pending'),
-    (SELECT count(*) FROM payments
-      WHERE status = 'failed' AND created_at::date = hoy),
-    -- No renovaron: miembros cuya suscripción venció y no volvió a activarse.
-    (SELECT count(*) FROM profiles
-      WHERE lower(trim(role)) = 'miembro'
-        AND lower(trim(subscription_status)) = 'expired')
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'invitado'),
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro' AND created_at::date = v_date),
+    COALESCE((SELECT SUM(amount) FROM public.payments WHERE status = 'success' AND paid_at::date = v_date), 0),
+    COALESCE((SELECT SUM(amount) FROM public.payments WHERE status = 'success' AND date_trunc('month', paid_at) = date_trunc('month', now())), 0),
+    COALESCE((SELECT COUNT(*) FROM public.payments WHERE status = 'success' AND paid_at::date = v_date), 0),
+    COALESCE((SELECT COUNT(*) FROM public.payments WHERE status = 'pending'), 0),
+    COALESCE((SELECT COUNT(*) FROM public.payments WHERE status = 'failed' AND paid_at::date = v_date), 0),
+    COUNT(*) FILTER (WHERE lower(trim(role)) = 'miembro' AND subscription_status = 'expired')
+  FROM public.profiles
   ON CONFLICT (snapshot_date) DO UPDATE SET
-    total_members    = excluded.total_members,
-    active_members   = excluded.active_members,
-    inactive_members = excluded.inactive_members,
-    expired_members  = excluded.expired_members,
-    invited_members  = excluded.invited_members,
-    new_members      = excluded.new_members,
-    revenue_day      = excluded.revenue_day,
-    revenue_month    = excluded.revenue_month,
-    payments_success = excluded.payments_success,
-    payments_pending = excluded.payments_pending,
-    payments_failed  = excluded.payments_failed,
-    non_renewals     = excluded.non_renewals
-  RETURNING s.* INTO resultado;
-
-  RETURN resultado;
+    total_members = EXCLUDED.total_members, active_members = EXCLUDED.active_members,
+    inactive_members = EXCLUDED.inactive_members, expired_members = EXCLUDED.expired_members,
+    invited_members = EXCLUDED.invited_members, new_members = EXCLUDED.new_members,
+    revenue_day = EXCLUDED.revenue_day, revenue_month = EXCLUDED.revenue_month,
+    payments_success = EXCLUDED.payments_success, payments_pending = EXCLUDED.payments_pending,
+    payments_failed = EXCLUDED.payments_failed, non_renewals = EXCLUDED.non_renewals;
 END;
-$$;
+$function$;
