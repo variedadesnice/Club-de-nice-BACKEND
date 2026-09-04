@@ -24,6 +24,7 @@ from app.api.promo_banners import router as promo_banners_router, public_router 
 from app.api.emails import public_router as email_public_router, admin_router as email_admin_router
 from app.api.raffles import router as raffles_router, public_router as raffles_public_router
 from app.api.roulette import router as roulette_router, public_router as roulette_public_router
+from app.api.sendhook import router as sendhook_webhook_router
 from app.api.streaks import router as streaks_router
 from app.api.tags import router as tags_router
 from app.api.users import router as users_router
@@ -61,4 +62,4 @@ api_router.include_router(email_public_router, prefix="/auth", tags=["email"])
 api_router.include_router(email_admin_router, prefix="/admin/emails", tags=["admin-email"])
 api_router.include_router(users_router, prefix="/users", tags=["users"])
 api_router.include_router(profile_router, prefix="/profile", tags=["profile"])
-
+api_router.include_router(sendhook_webhook_router, prefix="/webhooks", tags=["sendhook-webhook"])

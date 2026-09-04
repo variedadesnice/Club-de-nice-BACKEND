@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     port: int = 8000
     sendhook_api_url: str = ""
     sendhook_api_key: str = ""
+    # Secreto whsec_... para validar la firma de los webhooks entrantes de
+    # SendHook. Es un secreto aparte de la api_key: uno protege lo que
+    # mandamos, el otro valida lo que recibimos. Sin él, el receptor de
+    # webhooks rechaza todo (no se aceptan eventos sin firma verificada).
+    sendhook_webhook_secret: str = ""
 
     # Email — Resend
     resend_api_key: str = ""

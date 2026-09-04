@@ -1,5 +1,4 @@
 import base64
-import json
 import logging
 import re
 import threading
@@ -9,35 +8,16 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from app.core.config import get_settings
 from app.core.deps import invalidate_profile_cache
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
 from app.services import plans as plans_service
+from app.services import sendhook
 
 logger = logging.getLogger(__name__)
 
 _RECEIPT_BUCKET = "receipts"
 _SAFE_SEGMENT_RE = re.compile(r"[^a-zA-Z0-9._-]")
-
-def _normalize_sendhook_bank_label(value: str) -> Optional[str]:
-    """
-    Normaliza el texto libre del campo "Banco" (configurado por el admin en
-    payment_method_values, ej. "BNC", "Banco de Venezuela") al slug que
-    espera SendHook. Devuelve None si no es un banco que SendHook soporte hoy
-    (ej. Banesco) — en ese caso la verificación automática se omite.
-    """
-    v = (value or "").strip().lower()
-    if "bnc" in v or "nacional de cr" in v:
-        return "bnc"
-    if "bdv" in v or "de venezuela" in v:
-        return "bdv"
-    if "bfc" in v or "fondo com" in v:
-        return "bfc"
-    if "binance" in v:
-        return "binance"
-    return None
-
 
 def _get_destination_bank_slug(supabase, payment_method_id: str) -> Optional[str]:
     """
@@ -75,7 +55,7 @@ def _get_destination_bank_slug(supabase, payment_method_id: str) -> Optional[str
         return None
 
     value = (value_resp.data or {}).get("value")
-    return _normalize_sendhook_bank_label(value) if value else None
+    return sendhook.normalize_bank_label(value) if value else None
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +76,15 @@ def _get_user_email(supabase, user_id: str) -> Optional[str]:
         return resp.user.email if resp.user else None
     except Exception as exc:
         logger.warning("[_get_user_email] lookup failed user_id=%s [%s] %s", user_id, type(exc).__name__, supabase_error(exc))
+        return None
+
+
+def _get_profile_name(supabase, user_id: str) -> Optional[str]:
+    try:
+        resp = supabase.table("profiles").select("name").eq("id", user_id).maybe_single().execute()
+        return (resp.data or {}).get("name")
+    except Exception as exc:
+        logger.warning("[payments._get_profile_name] lookup failed user_id=%s [%s] %s", user_id, type(exc).__name__, supabase_error(exc))
         return None
 
 
@@ -132,97 +121,138 @@ def _cleanup_failed_registration(supabase, user_id: str) -> None:
         logger.warning("[payments._cleanup] auth user cleanup failed user_id=%s [%s] %s", user_id, type(exc).__name__, supabase_error(exc))
 
 
-def _normalize_phone_for_verification(phone: str) -> str:
-    """
-    Normaliza a formato local venezolano 0XXXXXXXXXX (11 dígitos) para
-    contraparte de SendHook. Toma siempre los últimos 10 dígitos (código de
-    operadora + número, invariable sin importar el prefijo) y antepone "0" —
-    esto tolera basura de prefijo real observada en producción (ej.
-    "+5804243771486": el frontend concatena "+58" delante de un número que
-    el usuario ya tipeó con su "0" local, dejando un 13-dígitos inválido que
-    ningún prefijo fijo distingue de forma confiable).
-    """
-    nums = "".join(c for c in phone if c.isdigit())
-    if len(nums) < 10:
-        return nums
-    return "0" + nums[-10:]
-
-
-def _build_verify_payload_json(amount_local: float, banco: str, referencia: str, contraparte: Optional[str]) -> str:
-    """
-    Arma el body de POST /pagos/verificar a mano en vez de dejar que el
-    encoder JSON por default de httpx/json.dumps serialice `monto` (un
-    float de Python recorta los ceros de cola: 25.50 -> "25.5", 0.10 ->
-    "0.1"). Formatear "monto" como f"{x:.2f}" y pegarlo como token numérico
-    sin comillas produce JSON igual de válido, con siempre 2 decimales.
-    """
-    monto_literal = f"{float(amount_local):.2f}"
-    rest = {"banco": banco, "referencia": referencia}
-    if contraparte:
-        rest["contraparte"] = contraparte
-    rest_json = json.dumps(rest)[1:]  # quita la "{" inicial, dejamos que "monto" abra el objeto
-    return f'{{"monto": {monto_literal}, {rest_json}'
-
-
 # Reintentos en background tras el primer intento fallido, por si el SMS/
 # notificación todavía no había llegado a SendHook. Los primeros 3 (20s,
 # 30s, 30s) cubren el caso rápido; el último (300s = 5 min) le da margen
 # real al teléfono/app de SendHook para procesar la notificación en casos
 # más lentos antes de rendirse y dejar el pago "pending" para revisión manual.
+#
+# Son una RED DE SEGURIDAD: el camino principal es el webhook de SendHook
+# (ver app/api/sendhook.py), que suele llegar antes que el primer reintento.
+# Se mantienen porque el webhook depende de que el admin de SendHook haya
+# registrado nuestra URL, y porque un webhook puede perderse.
 _RETRY_DELAYS_SECONDS = [20, 30, 30, 300]
 
 
-def _call_sendhook_verify(
-    base_url: str, api_key: str, amount_local: float, sendhook_bank: str,
-    reference_number: str, contraparte: Optional[str],
-) -> Optional[dict]:
-    """Un solo POST a /pagos/verificar. Devuelve el JSON de respuesta si status 200, None si falla."""
-    raw_body = _build_verify_payload_json(amount_local, sendhook_bank, reference_number, contraparte)
+def _payment_is_still_pending(supabase, payment_id: str) -> Optional[bool]:
+    """True/False según el estado en DB; None si la consulta falló."""
     try:
-        import httpx
-        url = f"{base_url.rstrip('/')}/pagos/verificar"
-        logger.info("[verify_auto] Enviando solicitud a %s body=%s", url, raw_body)
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.post(
-                url, content=raw_body.encode("utf-8"),
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            )
-            logger.info("[verify_auto] Respuesta status=%d", resp.status_code)
-            if resp.status_code == 200:
-                return resp.json()
-            logger.warning("[verify_auto] SendHook respondió %d: %s", resp.status_code, resp.text)
+        current = supabase.table("payments").select("status").eq("id", payment_id).maybe_single().execute()
     except Exception as exc:
-        logger.exception("[verify_auto] Error en verificación automática: %s", exc)
-    return None
+        logger.warning("[verify_auto] status check FAILED payment_id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
+        return None
+    if not current.data:
+        return False
+    return current.data.get("status") == "pending"
+
+
+def approve_from_sendhook(payment_id: str, pago: Optional[dict], source: str) -> bool:
+    """
+    Aprueba un pago que SendHook dio por bueno, venga del webhook o de un
+    reintento. Devuelve True si lo aprobó en esta llamada.
+
+    Es idempotente por diseño: si el pago ya no está 'pending' (un admin lo
+    aprobó a mano, o el webhook nos ganó de mano al reintento) no hace nada y
+    devuelve False, en vez de dejar que approve_payment tire un 400.
+    """
+    supabase = get_supabase()
+    if _payment_is_still_pending(supabase, payment_id) is not True:
+        logger.info("[verify_auto.%s] payment_id=%s ya no está pending, no se aprueba de nuevo.", source, payment_id)
+        return False
+
+    try:
+        approve_payment(payment_id)
+    except HTTPException as exc:
+        logger.warning("[verify_auto.%s] approve_payment falló payment_id=%s: %s", source, payment_id, exc.detail)
+        return False
+
+    # `pago_id` es el identificador definitivo del pago del lado de SendHook:
+    # guardarlo da trazabilidad pago-a-pedido (imprescindible con Binance, donde
+    # dos pagos iguales del mismo cliente sólo se distinguen por id y fecha).
+    _store_sendhook_payment_id(supabase, payment_id, pago)
+    return True
+
+
+def _store_sendhook_payment_id(supabase, payment_id: str, pago: Optional[dict]) -> None:
+    """Best-effort: si la columna todavía no existe en la DB, se ignora."""
+    pago_id = (pago or {}).get("id") or (pago or {}).get("pago_id")
+    if pago_id is None:
+        return
+    try:
+        supabase.table("payments").update({"sendhook_payment_id": pago_id}).eq("id", payment_id).execute()
+    except Exception as exc:
+        logger.info(
+            "[verify_auto] No se pudo guardar sendhook_payment_id=%s en payment_id=%s (¿falta la columna?): %s",
+            pago_id, payment_id, supabase_error(exc),
+        )
 
 
 def _retry_verification_in_background(
-    payment_id: str, base_url: str, api_key: str, amount_local: float,
-    sendhook_bank: str, reference_number: str, contraparte: Optional[str],
+    payment_id: str, amount_local: float, sendhook_bank: str,
+    referencia: Optional[str], contraparte: Optional[str], pedido_registrado: bool,
 ) -> None:
-    """Reintenta /pagos/verificar unas pocas veces más (hilo daemon, no bloquea
-    la request original). Antes de cada intento chequea que el pago siga
-    'pending' — si un admin ya lo aprobó/rechazó a mano, corta."""
+    """
+    Red de seguridad por si el webhook no llega. Hilo daemon, no bloquea la
+    request original. Antes de cada intento chequea que el pago siga 'pending'
+    — si el webhook o un admin ya lo resolvió, corta.
+
+    Si el pedido quedó pre-registrado en SendHook, se consulta
+    `GET /pedidos/{id}` (barato y no consume ningún pago). Si no, se cae a
+    `/pagos/verificar`, interpretando el `motivo` del fallo:
+
+    - `consumido`: ese pago ya se usó para aprobar otra cosa. Reintentar no lo
+      va a cambiar nunca, así que se corta y queda para revisión manual.
+    - `fuera_de_ventana`: existe un pago que encaja pero es más viejo que la
+      ventana pedida. Se amplía la ventana al tope de 24h y se sigue.
+    - `no_encontrado`: todavía no llegó (o nunca va a llegar). Se sigue
+      reintentando, que es exactamente para lo que están los reintentos.
+    """
     supabase = get_supabase()
+    ventana = sendhook.VENTANA_MINUTOS_DEFAULT
+
     for delay in _RETRY_DELAYS_SECONDS:
         time.sleep(delay)
-        try:
-            current = supabase.table("payments").select("status").eq("id", payment_id).maybe_single().execute()
-        except Exception as exc:
-            logger.warning("[verify_auto.retry] status check FAILED payment_id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
-            continue
-        if not current.data or current.data.get("status") != "pending":
+
+        if _payment_is_still_pending(supabase, payment_id) is not True:
             logger.info("[verify_auto.retry] payment_id=%s ya no está pending, deteniendo reintentos.", payment_id)
             return
 
-        data = _call_sendhook_verify(base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte)
+        if pedido_registrado:
+            pedido = sendhook.consultar_pedido(payment_id)
+            if pedido and pedido.get("estado") == "conciliado":
+                logger.info("[verify_auto.retry] Pedido conciliado en SendHook. Aprobando payment_id=%s", payment_id)
+                approve_from_sendhook(payment_id, pedido.get("pago"), "retry")
+                return
+            if pedido and pedido.get("estado") in ("cancelado", "expirado"):
+                logger.info(
+                    "[verify_auto.retry] Pedido en estado '%s' para payment_id=%s, queda para revisión manual.",
+                    pedido.get("estado"), payment_id,
+                )
+                return
+            continue
+
+        data = sendhook.verificar_pago(amount_local, sendhook_bank, referencia, contraparte, ventana)
         if data and data.get("verificado") is True:
-            logger.info("[verify_auto.retry] Pago verificado por SendHook en reintento (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
-            try:
-                approve_payment(payment_id)
-            except HTTPException as exc:
-                logger.warning("[verify_auto.retry] approve_payment falló payment_id=%s: %s", payment_id, exc.detail)
+            logger.info(
+                "[verify_auto.retry] Pago verificado por SendHook en reintento (pago_id=%s). Aprobando payment_id=%s",
+                data.get("pago_id"), payment_id,
+            )
+            approve_from_sendhook(payment_id, data, "retry")
             return
+
+        motivo = (data or {}).get("motivo")
+        if motivo == "consumido":
+            logger.warning(
+                "[verify_auto.retry] payment_id=%s: SendHook reporta 'consumido' (ese pago ya aprobó "
+                "otro pedido). Se cortan los reintentos, queda para revisión manual.", payment_id,
+            )
+            return
+        if motivo == "fuera_de_ventana" and ventana < sendhook.VENTANA_MINUTOS_MAX:
+            logger.info(
+                "[verify_auto.retry] payment_id=%s: 'fuera_de_ventana', ampliando la ventana a %d minutos.",
+                payment_id, sendhook.VENTANA_MINUTOS_MAX,
+            )
+            ventana = sendhook.VENTANA_MINUTOS_MAX
 
     logger.info("[verify_auto.retry] payment_id=%s sin match tras los reintentos, queda pending para revisión manual.", payment_id)
 
@@ -235,26 +265,33 @@ def _verify_payment_automatically(
     amount_local: float,
     sendhook_bank: Optional[str],
     payer_phone: Optional[str] = None,
+    payer_name: Optional[str] = None,
 ) -> Optional[dict]:
     """
-    Llama a la API de SendHook (POST /pagos/verificar) para verificar un pago
-    móvil automáticamente. Si SendHook responde verificado=true en el primer
-    intento, aprueba el pago inmediatamente y devuelve el registro aprobado.
-    Si no (SMS/notificación todavía no había llegado a SendHook), agenda unos
-    reintentos en background (_retry_verification_in_background) y devuelve
-    None de inmediato — la request de registro/renovación no espera por eso;
-    si un reintento posterior matchea, aprueba el pago ahí mismo.
+    Intenta verificar un pago móvil automáticamente contra SendHook.
+
+    Camino principal (el que SendHook recomienda): se registra el pago que
+    esperamos con POST /pedidos, usando NUESTRO payment_id como
+    `referencia_externa` — que además es la clave de idempotencia del lado de
+    ellos. Dos desenlaces:
+
+    - El pago ya había llegado: la respuesta viene con estado "conciliado" y
+      se aprueba en el acto, devolviendo el registro aprobado.
+    - Todavía no llegó: queda "pendiente" y SendHook nos avisa por webhook
+      (app/api/sendhook.py) en cuanto entre. La request no espera nada.
+
+    Como red de seguridad se agenda igual un hilo de reintentos, que consulta
+    GET /pedidos/{id} por si el webhook no está configurado o se pierde.
+
+    Si el pre-registro falla (SendHook caído, 422), se cae al camino viejo de
+    POST /pagos/verificar + reintentos.
 
     `sendhook_bank` es el banco RECEPTOR (la cuenta de El Club de Nice a la
     que el teléfono con la app SendHook está escuchando) — no el banco emisor
     que eligió el pagador. Se resuelve antes de llamar a esta función vía
     `_get_destination_bank_slug()`.
     """
-    settings = get_settings()
-    base_url = settings.sendhook_api_url
-    api_key = settings.sendhook_api_key
-
-    if not base_url or not api_key:
+    if not sendhook.is_configured():
         logger.info("[verify_auto] SendHook no configurado, omitiendo verificación.")
         return None
 
@@ -266,29 +303,69 @@ def _verify_payment_automatically(
         logger.info("[verify_auto] No se pudo resolver el banco receptor (campo 'Banco' del método), omitiendo.")
         return None
 
-    logger.info("[verify_auto] Iniciando para payment_id=%s banco=%s referencia=%s", payment_id, sendhook_bank, reference_number)
+    # Qué dato identifica el pago depende del banco receptor: BDV/BNC traen
+    # referencia, BFC se identifica por teléfono y Binance por el nombre de
+    # quien envía. Mandar el dato equivocado garantiza un no_encontrado.
+    referencia, contraparte = sendhook.build_identifiers(
+        sendhook_bank, reference_number, payer_phone or phone, payer_name,
+    )
+    if not referencia and not contraparte:
+        logger.info(
+            "[verify_auto] payment_id=%s sin referencia ni contraparte para banco=%s, omitiendo "
+            "(la API rechaza monto+banco solos).", payment_id, sendhook_bank,
+        )
+        return None
 
-    # `contraparte` y `referencia` se filtran combinados (AND) en SendHook, y
-    # BNC/BDV guardan el teléfono enmascarado (ej. "0424***1486") — nuestro
-    # teléfono sin enmascarar nunca matchea ahí como substring. Como
-    # `reference_number` es obligatorio en este flujo, mandar `contraparte`
-    # además de la referencia solo puede romper un match que ya era válido,
-    # nunca ayuda. Mismo criterio que usa SendHook en sus propios ejemplos
-    # para BDV/BNC: solo `contraparte` cuando no hay referencia.
-    contraparte = None
-    if not reference_number:
-        target_phone = payer_phone if payer_phone else phone
-        contraparte = _normalize_phone_for_verification(target_phone) if target_phone else None
+    logger.info(
+        "[verify_auto] Iniciando para payment_id=%s banco=%s referencia=%s contraparte=%s",
+        payment_id, sendhook_bank, referencia, contraparte,
+    )
 
-    data = _call_sendhook_verify(base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte)
-    if data and data.get("verificado") is True:
-        logger.info("[verify_auto] Pago verificado por SendHook (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
-        return approve_payment(payment_id)
+    pedido = sendhook.registrar_pedido(
+        referencia_externa=str(payment_id),
+        monto=amount_local,
+        banco=sendhook_bank,
+        referencia=referencia,
+        contraparte=contraparte,
+    )
 
-    logger.info("[verify_auto] Sin match en el primer intento, agendando reintentos en background para payment_id=%s.", payment_id)
+    if pedido and pedido.get("estado") == "conciliado":
+        logger.info("[verify_auto] El pago ya había llegado: pedido conciliado. Aprobando payment_id=%s", payment_id)
+        if approve_from_sendhook(payment_id, pedido.get("pago"), "pedido"):
+            return _get_payment_or_404(get_supabase(), payment_id)
+        return None
+
+    pedido_registrado = bool(pedido)
+    if not pedido_registrado:
+        # SendHook no aceptó el pre-registro. Intentamos la verificación
+        # directa acá mismo por si el pago ya estaba disponible.
+        data = sendhook.verificar_pago(amount_local, sendhook_bank, referencia, contraparte)
+        if data and data.get("verificado") is True:
+            logger.info(
+                "[verify_auto] Pago verificado por SendHook (pago_id=%s). Aprobando payment_id=%s",
+                data.get("pago_id"), payment_id,
+            )
+            if approve_from_sendhook(payment_id, data, "verificar"):
+                return _get_payment_or_404(get_supabase(), payment_id)
+            return None
+        if (data or {}).get("motivo") == "consumido":
+            logger.warning(
+                "[verify_auto] payment_id=%s: SendHook reporta 'consumido'. No se agendan reintentos.", payment_id,
+            )
+            return None
+        if not sendhook.is_webhook_configured():
+            logger.warning(
+                "[verify_auto] Ni pre-registro de pedido ni SENDHOOK_WEBHOOK_SECRET configurado: "
+                "el pago %s depende sólo de los reintentos.", payment_id,
+            )
+
+    logger.info(
+        "[verify_auto] payment_id=%s queda esperando (pedido_registrado=%s); se agendan reintentos de respaldo.",
+        payment_id, pedido_registrado,
+    )
     threading.Thread(
         target=_retry_verification_in_background,
-        args=(payment_id, base_url, api_key, amount_local, sendhook_bank, reference_number, contraparte),
+        args=(payment_id, amount_local, sendhook_bank, referencia, contraparte, pedido_registrado),
         daemon=True,
     ).start()
 
@@ -425,6 +502,9 @@ def register_with_payment(
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
         amount_local, sendhook_bank, payer_phone,
+        # Binance P2P no reporta referencia ni teléfono: el nombre de quien
+        # envía es el único dato con el que SendHook puede desambiguar.
+        payer_name=name,
     )
 
     if approved_payment:
@@ -700,6 +780,15 @@ def reject_payment(payment_id: str) -> dict:
     if payment["status"] != "pending":
         raise HTTPException(status_code=400, detail=f"Este pago ya fue procesado (estado actual: {payment['status']}).")
 
+    # El admin descartó este pago: si había un pedido esperándolo en SendHook,
+    # se cancela para que no siga vivo ni consuma un pago real más adelante.
+    # Un pedido ya conciliado responde 409 y se queda como está, que es correcto.
+    if sendhook.is_configured():
+        try:
+            sendhook.cancelar_pedido(str(payment_id))
+        except Exception as exc:
+            logger.warning("[payments.reject] cancelar_pedido falló payment_id=%s: %s", payment_id, exc)
+
     try:
         result = (
             supabase.table("payments")
@@ -848,6 +937,9 @@ def renew_subscription(
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
         amount_local, sendhook_bank, payer_phone,
+        # Igual que en el registro: para Binance el nombre es el único dato
+        # de desambiguación, y acá hay que leerlo del perfil.
+        payer_name=_get_profile_name(supabase, user_id),
     )
 
     if approved_payment:
