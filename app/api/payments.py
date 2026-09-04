@@ -47,6 +47,18 @@ def renew_subscription(body: RenewSubscriptionRequest, current_user: dict = Depe
     )
 
 
+@router.post("/recheck")
+def recheck_pending_payment(current_user: dict = Depends(get_current_user)):
+    """
+    Autenticado — el usuario pide reconsultar su pago pendiente contra SendHook
+    ("Verificar estado"). Aprueba en el acto si el pago ya entró.
+
+    Limitado por usuario (no por IP): 4 consultas por minuto. Devuelve 429 con
+    un mensaje que dice cuántos segundos faltan.
+    """
+    return payments_service.recheck_pending_payment(current_user["id"])
+
+
 @router.get("/")
 def list_payments(current_user: dict = Depends(get_current_admin)):
     """Admin — lista todos los pagos con el nombre y email del usuario asociado."""

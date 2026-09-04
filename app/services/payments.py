@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from app.core.deps import invalidate_profile_cache
 from app.core.exceptions import supabase_error
+from app.core.rate_limit import check_user_rate_limit
 from app.core.supabase import get_supabase
 from app.services import plans as plans_service
 from app.services import sendhook
@@ -370,6 +371,165 @@ def _verify_payment_automatically(
     ).start()
 
     return None
+
+
+# Cuántas consultas manuales puede hacer un usuario por minuto. El botón está
+# para que alguien que acaba de pagar no tenga que esperar al reintento de los
+# 5 minutos, no para sondear en bucle: cada pulsación es una llamada a
+# SendHook y ellos ven el tráfico como nuestro.
+_RECHECK_MAX_PER_MINUTE = 4
+
+
+def recheck_pending_payment(user_id: str) -> dict:
+    """
+    Re-consulta a SendHook el último pago pendiente del usuario, a pedido suyo
+    (botón "Verificar estado"). Si el pago ya entró, lo aprueba en el acto.
+
+    Es el mismo chequeo que hace el hilo de reintentos, pero disparado a mano:
+    sirve para el caso normal de alguien que paga, se registra, y no quiere
+    esperar a que caiga el reintento siguiente. Está limitado por usuario para
+    que no se convierta en un sondeo continuo contra SendHook.
+
+    Returns:
+        {"verificado": bool, "estado": str, "message": str, "payment": dict|None}
+        `estado` es uno de: "aprobado", "esperando", "sin_pendiente",
+        "no_automatico", "requiere_revision".
+    Raises:
+        HTTPException 429 — demasiadas consultas seguidas del mismo usuario.
+    """
+    check_user_rate_limit(user_id, _RECHECK_MAX_PER_MINUTE, 60, "payments-recheck")
+
+    supabase = get_supabase()
+
+    try:
+        resp = (
+            supabase.table("payments")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[payments.recheck] lookup FAILED user_id=%s [%s] %s", user_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    rows = resp.data or []
+    if not rows:
+        # Puede ser que ya se lo aprobaran (por webhook, por un reintento o a
+        # mano) entre que cargó la pantalla y pulsó el botón.
+        return {
+            "verificado": False,
+            "estado": "sin_pendiente",
+            "message": "No tienes ningún pago esperando verificación.",
+            "payment": None,
+        }
+
+    payment = rows[0]
+    payment_id = payment["id"]
+
+    if not sendhook.is_configured():
+        return {
+            "verificado": False,
+            "estado": "no_automatico",
+            "message": "Tu pago lo revisará un administrador. Te avisaremos por correo en cuanto se apruebe.",
+            "payment": payment,
+        }
+
+    sendhook_bank = _get_destination_bank_slug(supabase, payment.get("payment_method_id")) if payment.get("payment_method_id") else None
+    referencia, contraparte = sendhook.build_identifiers(
+        sendhook_bank or "",
+        payment.get("reference_number"),
+        payment.get("payer_phone") or payment.get("phone"),
+        _get_profile_name(supabase, user_id),
+    )
+
+    if not sendhook_bank or (not referencia and not contraparte):
+        # Método sin verificación automática posible (banco que SendHook no
+        # soporta, o sin ningún dato con el que desambiguar).
+        return {
+            "verificado": False,
+            "estado": "no_automatico",
+            "message": "Tu pago lo revisará un administrador. Te avisaremos por correo en cuanto se apruebe.",
+            "payment": payment,
+        }
+
+    logger.info("[payments.recheck] user_id=%s payment_id=%s banco=%s", user_id, payment_id, sendhook_bank)
+
+    # 1) Si el pedido quedó pre-registrado, preguntarle a él: es la consulta
+    #    barata y no consume ningún pago del lado de SendHook.
+    pedido = sendhook.consultar_pedido(str(payment_id))
+    if pedido and pedido.get("estado") == "conciliado":
+        if approve_from_sendhook(payment_id, pedido.get("pago"), "recheck"):
+            return _recheck_approved(supabase, payment_id)
+
+    # 2) Si no hay pedido (o sigue pendiente), preguntar directo por el pago.
+    #    Se usa la ventana máxima: acá el usuario está diciendo "ya pagué", y
+    #    un pago de hace horas es exactamente el caso que hay que rescatar.
+    amount_local = payment.get("amount_local")
+    if amount_local is None:
+        return _recheck_waiting(payment, None)
+
+    data = sendhook.verificar_pago(
+        float(amount_local), sendhook_bank, referencia, contraparte,
+        ventana_minutos=sendhook.VENTANA_MINUTOS_MAX,
+    )
+
+    if data and data.get("verificado") is True:
+        logger.info("[payments.recheck] Verificado (pago_id=%s). Aprobando payment_id=%s", data.get("pago_id"), payment_id)
+        if approve_from_sendhook(payment_id, data, "recheck"):
+            return _recheck_approved(supabase, payment_id)
+        # Alguien lo aprobó entre medio; devolver el estado real igual.
+        return _recheck_approved(supabase, payment_id)
+
+    return _recheck_waiting(payment, (data or {}).get("motivo"))
+
+
+def _recheck_approved(supabase, payment_id: str) -> dict:
+    return {
+        "verificado": True,
+        "estado": "aprobado",
+        "message": "¡Pago verificado! Tu cuenta ya está activa.",
+        "payment": _get_payment_or_404(supabase, payment_id),
+    }
+
+
+def _recheck_waiting(payment: dict, motivo: Optional[str]) -> dict:
+    """Traduce el `motivo` de SendHook a algo que le sirva a quien está mirando la pantalla."""
+    if motivo == "consumido":
+        # Concluyente sólo cuando mandamos referencia (BDV/BNC). Reintentar no
+        # lo va a cambiar, así que se le dice que hable con un administrador en
+        # vez de dejarlo pulsando el botón.
+        return {
+            "verificado": False,
+            "estado": "requiere_revision",
+            "message": (
+                "Ese pago ya figura usado en otra activación. Un administrador tiene que revisarlo; "
+                "escríbenos con tu número de referencia."
+            ),
+            "payment": payment,
+        }
+    if motivo == "fuera_de_ventana":
+        return {
+            "verificado": False,
+            "estado": "requiere_revision",
+            "message": (
+                "Encontramos un pago parecido pero es más antiguo de lo que podemos validar solos. "
+                "Un administrador lo revisará."
+            ),
+            "payment": payment,
+        }
+    return {
+        "verificado": False,
+        "estado": "esperando",
+        "message": (
+            "Todavía no vemos tu pago. Suele tardar unos minutos desde que el banco lo notifica; "
+            "vuelve a intentarlo en un momento."
+        ),
+        "payment": payment,
+    }
 
 
 # ---------------------------------------------------------------------------
