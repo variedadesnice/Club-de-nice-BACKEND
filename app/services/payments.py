@@ -105,7 +105,8 @@ def _get_payment_or_404(supabase, payment_id: str) -> dict:
         logger.error("[payments._get_payment_or_404] FAILED id=%s [%s] %s", payment_id, type(exc).__name__, msg, exc_info=True)
         raise HTTPException(status_code=500, detail=msg)
 
-    if not result.data:
+    # `maybe_single()` devuelve None sin filas, no un objeto con `.data` vacío.
+    if result is None or not result.data:
         raise HTTPException(status_code=404, detail="Pago no encontrado.")
     return result.data
 
@@ -136,15 +137,24 @@ _RETRY_DELAYS_SECONDS = [20, 30, 30, 300]
 
 
 def _payment_is_still_pending(supabase, payment_id: str) -> Optional[bool]:
-    """True/False según el estado en DB; None si la consulta falló."""
+    """
+    True/False según el estado en DB; None si la consulta falló.
+
+    La lectura del resultado va dentro del try a propósito: con
+    `maybe_single()` supabase-py devuelve None (no un objeto con `.data`
+    vacío) cuando no hay fila, así que tocar `.data` afuera revienta con
+    AttributeError justo en el caso normal de "ese pago no existe" — que es
+    exactamente lo que llega si el webhook trae una referencia_externa
+    desconocida.
+    """
     try:
         current = supabase.table("payments").select("status").eq("id", payment_id).maybe_single().execute()
+        if not current or not current.data:
+            return False
+        return current.data.get("status") == "pending"
     except Exception as exc:
         logger.warning("[verify_auto] status check FAILED payment_id=%s [%s] %s", payment_id, type(exc).__name__, supabase_error(exc))
         return None
-    if not current.data:
-        return False
-    return current.data.get("status") == "pending"
 
 
 def approve_from_sendhook(payment_id: str, pago: Optional[dict], source: str) -> bool:
