@@ -140,6 +140,8 @@ The service-role client has `auto_refresh_token=False` and `persist_session=Fals
 
 > `subscription_status` is maintained by the Postgres trigger `sync_subscription_status` on the `payments` table — do NOT update it manually; approve/reject payments instead.
 
+**Profile endpoints, and why there are two**: `GET /api/users/{id}/profile` (any authenticated member) returns only public fields — name, avatar, bio, city, role, level, achievements, streak, counters. `GET /api/users/{id}/admin-profile` (`get_current_admin`) returns all of that plus email (read from `auth.users`, not `profiles`), phone, gender, birthdate, `subscription_status`, `subscription_expires_at`, `joined_at` and the most recent payment row. They are deliberately separate services rather than one endpoint that widens its response by role: the public one is called from the wall by every member, so anything added to it is published to the whole community. The admin drawer block (`AdminProfileDetails.tsx`) is what calls the second one, and it only mounts when the viewer is an admin — that check exists to avoid a pointless 403, not as the protection; the protection is the route dependency.
+
 ### `posts` / `posts_view` / `post_tags` / `tags` / `post_reactions` / `post_comments` / `comment_reactions`
 Unchanged from the original social-feed design. **Always query `posts_view` for the feed** — never join manually in code. New: `GET /api/posts/me/social-impact` (🔑) returns an aggregate impact score for the current user (used in Profile stats).
 

@@ -158,3 +158,100 @@ def get_public_profile(user_id: str) -> dict:
         "completed_courses": completed_courses,
         "social_impact": social_impact,
     }
+
+def get_admin_profile(user_id: str) -> dict:
+    """
+    Perfil completo para administradores: todo lo del perfil público más los
+    datos de contacto y el estado de la suscripción.
+
+    Existe aparte de `get_public_profile()` a propósito. Ese endpoint lo puede
+    llamar cualquier miembro autenticado, así que agregarle el email y el
+    teléfono los expondría a toda la comunidad; acá el `Depends(get_current_admin)`
+    de la ruta es lo que separa una cosa de la otra. Si algún día hay que
+    cambiar qué es privado, se cambia en un solo lugar: el que devuelve esto.
+
+    Returns:
+        Lo mismo que get_public_profile() más:
+        {
+            email, phone, gender, birthdate, subscription_status,
+            subscription_expires_at, joined_at, last_payment: {...} | None
+        }
+    Raises:
+        HTTPException 404 — perfil no encontrado
+        HTTPException 500 — fallo de base de datos
+    """
+    logger.info("[users.get_admin_profile] user_id=%s", user_id)
+    perfil = get_public_profile(user_id)
+    supabase = get_supabase()
+
+    privados = {}
+    try:
+        resp = (
+            supabase.table("profiles")
+            .select("phone, gender, birthdate, subscription_status")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        privados = (resp.data if resp else None) or {}
+    except Exception as exc:
+        logger.warning("[users.get_admin_profile] private fields failed user_id=%s [%s]", user_id, supabase_error(exc))
+
+    # El email vive en auth.users, no en profiles.
+    email = None
+    joined_at = None
+    try:
+        auth_resp = supabase.auth.admin.get_user_by_id(user_id)
+        if auth_resp and auth_resp.user:
+            email = auth_resp.user.email
+            joined_at = getattr(auth_resp.user, "created_at", None)
+            if joined_at is not None and not isinstance(joined_at, str):
+                joined_at = joined_at.isoformat()
+    except Exception as exc:
+        logger.warning("[users.get_admin_profile] auth lookup failed user_id=%s [%s] %s", user_id, type(exc).__name__, exc)
+
+    # Último pago: es lo que suele hacer falta para resolver un reclamo o
+    # confirmar que quien escribe es quien pagó.
+    ultimo_pago = None
+    expires_at = None
+    try:
+        pagos = (
+            supabase.table("payments")
+            .select("id, status, plan, amount, amount_local, reference_number, payment_method, created_at, paid_at, expires_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if pagos and pagos.data:
+            ultimo_pago = pagos.data[0]
+    except Exception as exc:
+        logger.warning("[users.get_admin_profile] last payment failed user_id=%s [%s]", user_id, supabase_error(exc))
+
+    try:
+        vigentes = (
+            supabase.table("payments")
+            .select("expires_at")
+            .eq("user_id", user_id)
+            .eq("status", "success")
+            .order("expires_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if vigentes and vigentes.data:
+            expires_at = vigentes.data[0].get("expires_at")
+    except Exception as exc:
+        logger.warning("[users.get_admin_profile] expires_at failed user_id=%s [%s]", user_id, supabase_error(exc))
+
+    perfil.update({
+        "email": email,
+        "phone": privados.get("phone"),
+        "gender": privados.get("gender"),
+        "birthdate": privados.get("birthdate"),
+        "subscription_status": privados.get("subscription_status"),
+        "subscription_expires_at": expires_at,
+        "joined_at": joined_at,
+        "last_payment": ultimo_pago,
+    })
+    logger.info("[users.get_admin_profile] OK user_id=%s", user_id)
+    return perfil
