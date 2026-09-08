@@ -494,6 +494,144 @@ def admin_update_achievement(achievement_id: str, update_data: dict) -> dict:
     return resp.data[0]
 
 
+def _count_achievement_awards(supabase, achievement_id: str) -> int:
+    try:
+        resp = (
+            supabase.table("user_achievements")
+            .select("id", count="exact")
+            .eq("achievement_type_id", achievement_id)
+            .limit(1)
+            .execute()
+        )
+        if resp is None:
+            return 0
+        if resp.count is not None:
+            return resp.count
+        return len(resp.data or [])
+    except Exception as exc:
+        # Sin poder contar no se puede decidir con seguridad si el borrado es
+        # inocuo, así que se corta acá en vez de arriesgar un borrado ciego.
+        msg = supabase_error(exc)
+        logger.error("[levels._count_achievement_awards] FAILED id=%s [%s] %s", achievement_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+
+def admin_delete_achievement(achievement_id: str, force: bool = False) -> dict:
+    """
+    Elimina una insignia del catálogo.
+
+    Por defecto sólo borra insignias que nadie obtuvo todavía. Si ya se otorgó,
+    responde 409 con cuánta gente la tiene: borrarla les quitaría la insignia
+    del perfil de forma irreversible, y esa es una decisión del admin, no un
+    efecto colateral de pulsar un botón. Con `force=True` se borra igual.
+
+    El XP que la insignia repartió NO se le quita a nadie. Se desvincula la
+    fila de `xp_transactions` (achievement_type_id -> NULL) en vez de borrarla,
+    así el historial de XP queda íntegro y los totales de `user_levels` siguen
+    cuadrando; lo único que se pierde es el enlace a una insignia que ya no
+    existe.
+
+    Returns: {"deleted": True, "awards_removed": int}
+    Raises:
+        HTTPException 404 — la insignia no existe
+        HTTPException 409 — ya fue otorgada y no se pasó force
+        HTTPException 500 — fallo de base de datos
+    """
+    logger.info("[levels.admin_delete_achievement] id=%s force=%s", achievement_id, force)
+    supabase = get_supabase()
+
+    try:
+        existing = (
+            supabase.table("achievement_types")
+            .select("id, name")
+            .eq("id", achievement_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=supabase_error(exc))
+
+    if not existing or not existing.data:
+        raise HTTPException(status_code=404, detail="Insignia no encontrada.")
+
+    awards = _count_achievement_awards(supabase, achievement_id)
+
+    if awards > 0 and not force:
+        personas = "1 persona la tiene" if awards == 1 else f"{awards} personas la tienen"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"No se eliminó: {personas} en su perfil. Puedes desactivarla para que deje de "
+                f"otorgarse sin quitársela a nadie, o confirmar el borrado definitivo."
+            ),
+        )
+
+    if awards > 0:
+        # Orden importante: primero se sueltan las referencias, después se
+        # borra la fila. Al revés, la FK aborta el DELETE.
+        try:
+            supabase.table("xp_transactions").update({"achievement_type_id": None}).eq("achievement_type_id", achievement_id).execute()
+        except Exception as exc:
+            logger.warning("[levels.admin_delete_achievement] no se pudo desvincular xp_transactions id=%s: %s", achievement_id, supabase_error(exc))
+        try:
+            supabase.table("user_achievements").delete().eq("achievement_type_id", achievement_id).execute()
+        except Exception as exc:
+            msg = supabase_error(exc)
+            logger.error("[levels.admin_delete_achievement] borrado de user_achievements FAILED id=%s [%s] %s", achievement_id, type(exc).__name__, msg, exc_info=True)
+            raise HTTPException(status_code=500, detail=msg)
+    else:
+        # Aunque no haya nadie con la insignia, puede haber quedado alguna fila
+        # de XP apuntándole (una insignia otorgada y luego revocada a mano).
+        try:
+            supabase.table("xp_transactions").update({"achievement_type_id": None}).eq("achievement_type_id", achievement_id).execute()
+        except Exception as exc:
+            logger.warning("[levels.admin_delete_achievement] no se pudo desvincular xp_transactions id=%s: %s", achievement_id, supabase_error(exc))
+
+    try:
+        supabase.table("achievement_types").delete().eq("id", achievement_id).execute()
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[levels.admin_delete_achievement] FAILED id=%s [%s] %s", achievement_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    logger.info("[levels.admin_delete_achievement] OK id=%s awards_removed=%d", achievement_id, awards)
+    return {"deleted": True, "awards_removed": awards}
+
+
+def admin_delete_tier(tier_id: str) -> dict:
+    """
+    Elimina un rango de nivel.
+
+    A diferencia de las insignias, nadie "tiene" un rango: el de cada usuario
+    se calcula al vuelo buscando qué fila cubre su nivel actual. Así que borrar
+    uno no deja datos huérfanos, sólo un hueco en la escalera — quien caiga en
+    ese rango de niveles se queda sin rango hasta que se cubra.
+
+    Returns: {"deleted": True}
+    Raises: HTTPException 404 · HTTPException 500
+    """
+    logger.info("[levels.admin_delete_tier] id=%s", tier_id)
+    supabase = get_supabase()
+
+    try:
+        existing = supabase.table("level_tiers").select("id").eq("id", tier_id).limit(1).execute()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=supabase_error(exc))
+
+    if not existing or not existing.data:
+        raise HTTPException(status_code=404, detail="Nivel no encontrado.")
+
+    try:
+        supabase.table("level_tiers").delete().eq("id", tier_id).execute()
+    except Exception as exc:
+        msg = supabase_error(exc)
+        logger.error("[levels.admin_delete_tier] FAILED id=%s [%s] %s", tier_id, type(exc).__name__, msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=msg)
+
+    logger.info("[levels.admin_delete_tier] OK id=%s", tier_id)
+    return {"deleted": True}
+
+
 def admin_get_tiers() -> list:
     """Returns todos los rangos de nivel."""
     logger.info("[levels.admin_get_tiers]")

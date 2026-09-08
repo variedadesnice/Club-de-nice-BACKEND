@@ -453,7 +453,7 @@ def recheck_pending_payment(user_id: str) -> dict:
         sendhook_bank or "",
         payment.get("reference_number"),
         payment.get("payer_phone") or payment.get("phone"),
-        _get_profile_name(supabase, user_id),
+        payment.get("payer_name") or _get_profile_name(supabase, user_id),
     )
 
     if not sendhook_bank or (not referencia and not contraparte):
@@ -553,6 +553,7 @@ def register_with_payment(
     currency_id: str, amount_local: float, exchange_rate: float,
     origin_bank: Optional[str] = None, payer_id_number: Optional[str] = None,
     payer_phone: Optional[str] = None, payment_date: Optional[str] = None,
+    payer_name: Optional[str] = None,
 ) -> dict:
     """
     Crea el usuario en Supabase Auth + perfil (role='miembro', subscription_status='inactive')
@@ -641,15 +642,17 @@ def register_with_payment(
         "payer_id_number": payer_id_number,
         "payer_phone": payer_phone,
         "payment_date": payment_date,
+        "payer_name": payer_name,
     }
     try:
         payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        if "payer_phone" in msg or "payment_date" in msg:
-            logger.warning("[payments.register] Faltan columnas en DB. Reintentando sin payer_phone/payment_date. Error: %s", msg)
+        if "payer_phone" in msg or "payment_date" in msg or "payer_name" in msg:
+            logger.warning("[payments.register] Faltan columnas en DB. Reintentando sin payer_phone/payment_date/payer_name. Error: %s", msg)
             insert_data.pop("payer_phone", None)
             insert_data.pop("payment_date", None)
+            insert_data.pop("payer_name", None)
             try:
                 payment_resp = supabase.table("payments").insert(insert_data).execute()
             except Exception as retry_exc:
@@ -673,8 +676,11 @@ def register_with_payment(
         payment["id"], is_auto_verify, reference_number, phone,
         amount_local, sendhook_bank, payer_phone,
         # Binance P2P no reporta referencia ni teléfono: el nombre de quien
-        # envía es el único dato con el que SendHook puede desambiguar.
-        payer_name=name,
+        # envía es el único dato con el que SendHook puede desambiguar. Se usa
+        # el que la persona declaró en el formulario, porque su nombre en
+        # Binance no tiene por qué ser el que puso al crear la cuenta; el de
+        # la cuenta queda sólo como respaldo.
+        payer_name=payer_name or name,
     )
 
     if approved_payment:
@@ -1033,6 +1039,7 @@ def renew_subscription(
     currency_id: str, amount_local: float, exchange_rate: float,
     origin_bank: Optional[str] = None, payer_id_number: Optional[str] = None,
     payer_phone: Optional[str] = None, payment_date: Optional[str] = None,
+    payer_name: Optional[str] = None,
 ) -> dict:
     """
     Registra un pago de renovación de suscripción para un usuario ya existente.
@@ -1078,15 +1085,17 @@ def renew_subscription(
         "payer_id_number": payer_id_number,
         "payer_phone": payer_phone,
         "payment_date": payment_date,
+        "payer_name": payer_name,
     }
     try:
         payment_resp = supabase.table("payments").insert(insert_data).execute()
     except Exception as exc:
         msg = supabase_error(exc)
-        if "payer_phone" in msg or "payment_date" in msg:
-            logger.warning("[payments.renew] Faltan columnas en DB. Reintentando sin payer_phone/payment_date. Error: %s", msg)
+        if "payer_phone" in msg or "payment_date" in msg or "payer_name" in msg:
+            logger.warning("[payments.renew] Faltan columnas en DB. Reintentando sin payer_phone/payment_date/payer_name. Error: %s", msg)
             insert_data.pop("payer_phone", None)
             insert_data.pop("payment_date", None)
+            insert_data.pop("payer_name", None)
             try:
                 payment_resp = supabase.table("payments").insert(insert_data).execute()
             except Exception as retry_exc:
@@ -1107,9 +1116,9 @@ def renew_subscription(
     approved_payment = _verify_payment_automatically(
         payment["id"], is_auto_verify, reference_number, phone,
         amount_local, sendhook_bank, payer_phone,
-        # Igual que en el registro: para Binance el nombre es el único dato
-        # de desambiguación, y acá hay que leerlo del perfil.
-        payer_name=_get_profile_name(supabase, user_id),
+        # Igual que en el registro: el nombre declarado en el formulario manda,
+        # y el del perfil queda de respaldo.
+        payer_name=payer_name or _get_profile_name(supabase, user_id),
     )
 
     if approved_payment:

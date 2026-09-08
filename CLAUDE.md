@@ -167,6 +167,7 @@ Unchanged from the original social-feed design. **Always query `posts_view` for 
 | `payer_id_number` | text, nullable | Payer's Venezuelan national ID (cédula, e.g. `V12177212`). Renamed from `cedula_pagador`. |
 | `payer_phone` | text, nullable | Payer's Pago Móvil phone number. Renamed from `telefono_pagador`. |
 | `payment_date` | date, nullable | Date the user claims to have paid, as entered on the form. |
+| `payer_name` | text, nullable | Name the payer says the payment shows up under. Only asked for (and only used) when the destination method is Binance P2P. |
 
 **Plan durations (since 2026-07-30)**: come from the `plans` table (admin-configurable via `/api/admin/plans`), not a hardcoded dict. `duration_days = NULL` means "indefinido" (no expiry). Seeded rows: `1m`=30d/$25 (active), `3m`=90d (inactive, price placeholder), `6m`=180d (inactive, price placeholder), `1y`=365d/$197 (active), `indefinido`=NULL (inactive, price placeholder) — matches the two plans previously hardcoded in the frontend (`1m`, `1y`); the rest exist as inactive placeholders preserving old plan codes that may appear on historical payments.
 
@@ -188,7 +189,7 @@ Since 2026-09-04 the primary path is SendHook's recommended **pedidos + webhook*
 |---|---|---|
 | `bdv`, `bnc` | `referencia` only | Filters combine with AND, and these banks store the phone masked (`0424***1486`), so adding our unmasked `contraparte` can only break an otherwise valid match. |
 | `bfc` | `contraparte` = payer phone | No reference in the SMS. |
-| `binance` | `contraparte` = payer **name** | P2P has neither a reference nor a real phone. `register_with_payment()` passes the registration `name`; `renew_subscription()` reads it from `profiles`. |
+| `binance` | `contraparte` = payer **name** | P2P has neither a reference nor a real phone. The name comes from `payments.payer_name`, asked for explicitly at checkout (the form swaps in a "Nombre en Binance" field when the method's `Banco` value says Binance, and relabels the reference field as the P2P order number). The account/profile name is only a fallback — someone's Binance display name is often not what they typed when signing up. |
 
 Reference matching is on the **last 6 digits**, so leading zeros and bank-code prefixes are harmless (`006687065139`, `6687065139` and `065139` all match) — never ask the user to normalize it. Amounts are serialized by hand (`_build_body`) so `25.50` stays `25.50`; the default JSON encoder would emit `25.5`.
 
@@ -200,7 +201,7 @@ Anything that never verifies stays `"pending"` for manual review. `reject_paymen
 
 Rate limited to **4 calls per user per minute** via `check_user_rate_limit()` in `app/core/rate_limit.py`. That helper is deliberately different from the existing `rate_limiter` dependency in two ways: it keys on the authenticated user id rather than the IP (a mobile NAT puts many members behind one address, and one member changes address moving between wifi and data), and it falls back to an in-process counter when Redis is unavailable instead of degrading to no limit at all — every call costs a real request to SendHook. On block it raises `429` whose detail already names the seconds left; the frontend shows that message as a notice rather than an error.
 
-**DB objects this needs**: `el-club-de-nice/supabase/sendhook-pedidos-webhook.sql` creates `sendhook_webhook_events` (webhook idempotency) and adds `payments.sendhook_payment_id`. Both are handled defensively in code — a missing table or column degrades to a log line rather than a failure — but until the SQL runs, a redelivered webhook is not deduplicated by event id (only by the `pending` re-check).
+**DB objects this needs**: `el-club-de-nice/supabase/sendhook-pedidos-webhook.sql` creates `sendhook_webhook_events` (webhook idempotency) and adds `payments.sendhook_payment_id`; `el-club-de-nice/supabase/binance-payer-name.sql` adds `payments.payer_name` (Binance matching). Both are handled defensively in code — a missing table or column degrades to a log line rather than a failure — but until the SQL runs, a redelivered webhook is not deduplicated by event id (only by the `pending` re-check).
 
 ### `plans`
 Admin-configurable subscription plan catalog (since 2026-07-30) — replaces the old hardcoded `1m`/`3m`/`6m`/`1y`/`indefinido` set. `id`, `code` (unique, normalized lowercase — this is the value stored in `payments.plan`), `name` (display name), `sublabel` (nullable), `duration_days` (nullable — `NULL` = indefinido, no expiry), `price_usd`, `is_active`, `sort_order`, `created_at`, `updated_at`. RLS enabled, no policies (service-role only, same as every other table).
@@ -288,6 +289,10 @@ Tracks per-user chapter completion. Backs `complete_chapter` / `get_course_progr
 | `xp_transactions` | `id`, `user_id` FK, `amount`, `reason`, `achievement_type_id` FK, `created_at` |
 
 RPC `award_xp(p_user_id, p_amount, p_reason, p_achievement_type_id)` updates `user_levels` and logs `xp_transactions`.
+
+**Deleting badges and tiers** (added 2026-09-07): `DELETE /api/admin/achievements/{id}` and `DELETE /api/admin/levels/tiers/{id}`. Both were called by the admin panel long before they existed on the server, so every delete button answered `405` — the panel showed "Error al eliminar insignia: Method Not Allowed".
+
+A badge someone already earned is not deleted silently: `admin_delete_achievement()` counts `user_achievements` rows first and answers `409` naming how many people hold it, so the panel can offer deactivating (`is_active = false`, stops awarding without taking it away) versus deleting for real. `?force=true` goes through with it. Two foreign keys point at `achievement_types` and both must be released before the row goes, in this order: `xp_transactions.achievement_type_id` is set to **NULL** rather than deleted (the XP history stays intact and `user_levels` totals keep adding up — nobody loses XP they earned), then `user_achievements` rows are deleted, then the type itself. Tiers have no inbound FK at all: a user's tier is resolved at read time by `_get_tier_for_level()` matching `min_level`/`max_level`, so deleting one only leaves a gap in the ladder.
 
 **`process_achievement(code, user_id, metadata?)` algorithm** (triggered server-side, e.g. from `classroom.complete_chapter()` for `lesson_completed`/`course_completed`):
 1. Fetch active achievement by code.

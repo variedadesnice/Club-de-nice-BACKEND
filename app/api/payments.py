@@ -33,6 +33,7 @@ def register_with_payment(body: RegisterWithPaymentRequest):
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
         body.origin_bank, body.payer_id_number, body.payer_phone, body.payment_date,
+        body.payer_name,
     )
 
 
@@ -44,6 +45,7 @@ def renew_subscription(body: RenewSubscriptionRequest, current_user: dict = Depe
         body.payment_method_id, body.reference_number, body.phone, body.receipt_path,
         body.currency_id, body.amount_local, body.exchange_rate,
         body.origin_bank, body.payer_id_number, body.payer_phone, body.payment_date,
+        body.payer_name,
     )
 
 

@@ -30,6 +30,13 @@ class RegisterWithPaymentRequest(BaseModel):
     origin_bank: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
     payer_id_number: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
     payer_phone: Optional[str] = Field(None, description="Teléfono del pagador (ej. 04246296646)")
+    payer_name: Optional[str] = Field(
+        None,
+        description=(
+            "Nombre de quien envía el pago, tal como lo ve el receptor. Es el único dato con el "
+            "que se puede verificar un pago de Binance P2P, que no trae ni referencia ni teléfono."
+        ),
+    )
     payment_date: Optional[str] = Field(None, description="Fecha del pago (ej. 2026-06-06)")
 
 
@@ -46,6 +53,13 @@ class RenewSubscriptionRequest(BaseModel):
     origin_bank: Optional[str] = Field(None, description="Código de 4 dígitos del banco emisor (ej. 0102)")
     payer_id_number: Optional[str] = Field(None, description="Cédula del pagador (ej. V12177212)")
     payer_phone: Optional[str] = Field(None, description="Teléfono del pagador (ej. 04246296646)")
+    payer_name: Optional[str] = Field(
+        None,
+        description=(
+            "Nombre de quien envía el pago, tal como lo ve el receptor. Es el único dato con el "
+            "que se puede verificar un pago de Binance P2P, que no trae ni referencia ni teléfono."
+        ),
+    )
     payment_date: Optional[str] = Field(None, description="Fecha del pago (ej. 2026-06-06)")
 
 
