@@ -27,7 +27,7 @@ def admin_create_payment_method(body: CreatePaymentMethodRequest, current_user: 
 
 @router.patch("/{method_id}")
 def admin_update_payment_method(method_id: str, body: UpdatePaymentMethodRequest, current_user: dict = Depends(get_current_admin)):
-    """Admin — edita nombre, descripción, estado o sort_order de un método de pago."""
+    """Admin — edita nombre, descripción, estado, verificación automática o sort_order."""
     return payment_methods_service.admin_update_payment_method(method_id, body.model_dump(exclude_none=True))
 
 

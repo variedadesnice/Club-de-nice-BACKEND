@@ -215,7 +215,7 @@ Frontend (`Register.tsx`/`RenewalGateway.tsx`) fetches `GET /api/plans/` instead
 
 ### `payment_methods` / `payment_method_fields` / `payment_method_values`
 Configurable catalog of payment instructions admins manage, surfaced to users during registration:
-- `payment_methods`: `id`, `name`, `description`, `is_active`, `sort_order`, `auto_verify` (bool — enables the automatic Pago Móvil verification flow below for this method)
+- `payment_methods`: `id`, `name`, `description`, `is_active`, `sort_order`, `auto_verify` (bool — enables the automatic verification flow below for this method; editable from the admin panel since 2026-09-07, it used to be SQL-only, which meant a new method could not be automated without a DB edit)
 - `payment_method_fields`: `id`, `payment_method_id` FK, `field_key`, `field_label`, `field_type` (`text`\|`email`\|`phone`\|`number`), `is_required`, `sort_order`
 - `payment_method_values`: `id`, `payment_method_id` FK, `payment_method_field_id` FK, `value` (nullable) — the actual displayed value (e.g. an account number)
 

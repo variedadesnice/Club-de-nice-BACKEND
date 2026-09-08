@@ -17,6 +17,14 @@ class CreatePaymentMethodRequest(BaseModel):
     name: str = Field(..., min_length=1)
     description: Optional[str] = None
     is_active: bool = True
+    auto_verify: bool = Field(
+        False,
+        description=(
+            "Activa la verificación automática de pagos (SendHook) para este método. "
+            "Requiere además que el método tenga un campo con etiqueta 'Banco' cuyo "
+            "valor sea un banco soportado: BDV, BNC, BFC o Binance."
+        ),
+    )
     sort_order: int = Field(0, ge=0)
     fields: list[PaymentMethodFieldRequest] = Field(default_factory=list)
 
@@ -25,6 +33,14 @@ class UpdatePaymentMethodRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1)
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    auto_verify: Optional[bool] = Field(
+        None,
+        description=(
+            "Activa la verificación automática de pagos (SendHook) para este método. "
+            "Requiere además que el método tenga un campo con etiqueta 'Banco' cuyo "
+            "valor sea un banco soportado: BDV, BNC, BFC o Binance."
+        ),
+    )
     sort_order: Optional[int] = Field(None, ge=0)
 
 

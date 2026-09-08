@@ -307,7 +307,7 @@ def admin_create_payment_method(data: dict) -> dict:
 
 def admin_update_payment_method(method_id: str, data: dict) -> dict:
     """
-    Edita nombre, descripción, estado o sort_order de un método de pago.
+    Edita nombre, descripción, estado, verificación automática o sort_order.
 
     Returns:
         Método de pago actualizado, con campos y valores.
