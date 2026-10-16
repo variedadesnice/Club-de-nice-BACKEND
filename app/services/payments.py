@@ -788,7 +788,7 @@ def list_payments() -> list:
     el nombre y email del usuario asociado.
 
     Returns:
-        Lista de pagos, cada uno con `user_name` y `user_email` añadidos.
+        Lista de pagos, cada uno con `user_name`, `user_email` y `plan_name` añadidos.
     Raises:
         HTTPException 500 — fallo de base de datos
     """
@@ -808,10 +808,12 @@ def list_payments() -> list:
         raise HTTPException(status_code=500, detail=msg)
 
     rows = result.data or []
+    plan_names = plans_service.get_plan_names(supabase)
     email_cache: dict[str, Optional[str]] = {}
     for row in rows:
         profile = row.pop("profiles", None) or {}
         row["user_name"] = profile.get("name")
+        row["plan_name"] = (plan_names.get(row.get("plan")) or {}).get("name") or row.get("plan")
 
         user_id = row.get("user_id")
         # user_id puede ser NULL: pagos de registro rechazados cuya cuenta
@@ -831,7 +833,8 @@ def get_user_payments(user_id: str, requester_id: str) -> list:
     usuario o para un admin.
 
     Returns:
-        Lista de pagos del usuario ordenados por fecha de creación desc.
+        Lista de pagos del usuario ordenados por fecha de creación desc, con
+        `plan_name` (nombre del plan en `plans`, o el código si ya no existe).
     Raises:
         HTTPException 403 — el solicitante no es ni el dueño ni un admin
         HTTPException 500 — fallo de base de datos
@@ -856,6 +859,9 @@ def get_user_payments(user_id: str, requester_id: str) -> list:
         raise HTTPException(status_code=500, detail=msg)
 
     rows = result.data or []
+    plan_names = plans_service.get_plan_names(supabase)
+    for row in rows:
+        row["plan_name"] = (plan_names.get(row.get("plan")) or {}).get("name") or row.get("plan")
     logger.info("[payments.get_user_payments] returned %d items", len(rows))
     return rows
 

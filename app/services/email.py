@@ -10,7 +10,7 @@ que congela la ejecución en cuanto se devuelve la respuesta HTTP. Un envío
 en un hilo de fondo se perdería sin dejar rastro.
 """
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import resend
@@ -260,19 +260,25 @@ def send_password_reset(to: str, name: str, reset_link: str) -> bool:
     return _send(to, "Restablece tu contraseña — El Club de Nice", _password_reset_html(name, reset_link))
 
 
-def send_renewal_reminder(to: str, name: str, days_left: int, expires_date: str) -> bool:
-    """Aviso de renovación (5 días o 1 día antes)."""
-    subject = (
+_EXPIRED_SUBJECT = "Tu suscripción ha vencido — El Club de Nice"
+
+
+def _renewal_subject(days_left: int) -> str:
+    return (
         "¡Tu suscripción vence mañana! — El Club de Nice"
         if days_left <= 1
         else f"Tu suscripción vence en {days_left} días — El Club de Nice"
     )
-    return _send(to, subject, _renewal_reminder_html(name, days_left, expires_date))
+
+
+def send_renewal_reminder(to: str, name: str, days_left: int, expires_date: str) -> bool:
+    """Aviso de renovación (5 días o 1 día antes)."""
+    return _send(to, _renewal_subject(days_left), _renewal_reminder_html(name, days_left, expires_date))
 
 
 def send_expired_notice(to: str, name: str) -> bool:
     """Aviso de cuenta vencida."""
-    return _send(to, "Tu suscripción ha vencido — El Club de Nice", _expired_html(name))
+    return _send(to, _EXPIRED_SUBJECT, _expired_html(name))
 
 
 def send_raffle_winner(to: str, name: str, raffle_title: str) -> bool:
@@ -281,91 +287,173 @@ def send_raffle_winner(to: str, name: str, raffle_title: str) -> bool:
 
 
 # ─── Lógica de recordatorios automáticos ─────────────────────────────────────
+#
+# El cron llama esto por HTTP (pg_net) una vez al día, y pg_net corta la
+# petición a los pocos segundos. Por eso todo va en pocas idas y vueltas fijas,
+# sin importar cuántos usuarios toque: 3 consultas a la base, 1 a Auth para
+# los emails y 1 envío por lotes a Resend por cada 100 correos.
+#
+# Cada usuario se evalúa por su vencimiento MÁS LEJANO, no pago por pago: quien
+# renovó antes de tiempo tiene un pago viejo que igual vence, y no debe recibir
+# "tu suscripción vence" ni "ha vencido" por ése.
 
-def _fetch_expiring(days_ahead: int) -> list[dict]:
-    """Devuelve pagos activos cuyo expires_at cae exactamente en today+days_ahead."""
-    supabase = get_supabase()
-    start = (date.today() + timedelta(days=days_ahead)).isoformat()
-    end = (date.today() + timedelta(days=days_ahead + 1)).isoformat()
+_RESEND_BATCH_LIMIT = 100
+
+
+def _parse_expiry_date(expires_at: str) -> Optional[date]:
     try:
-        resp = (
-            supabase.table("payments")
-            .select("user_id, plan, expires_at, profiles(name)")
-            .eq("status", "success")
-            .gte("expires_at", start)
-            .lt("expires_at", end)
-            .execute()
-        )
-        return resp.data or []
-    except Exception as exc:
-        logger.error("[email.renewal] fetch expiring days=%d FAILED: %s", days_ahead, supabase_error(exc))
-        return []
-
-
-def _fetch_expired_today() -> list[dict]:
-    """Devuelve pagos que expiraron en las últimas 24 horas."""
-    supabase = get_supabase()
-    start = date.today().isoformat()
-    end = (date.today() + timedelta(days=1)).isoformat()
-    try:
-        resp = (
-            supabase.table("payments")
-            .select("user_id, plan, expires_at, profiles(name)")
-            .eq("status", "success")
-            .gte("expires_at", start)
-            .lt("expires_at", end)
-            .execute()
-        )
-        return resp.data or []
-    except Exception as exc:
-        logger.error("[email.renewal] fetch expired_today FAILED: %s", supabase_error(exc))
-        return []
-
-
-def _get_email(user_id: str) -> Optional[str]:
-    try:
-        resp = get_supabase().auth.admin.get_user_by_id(user_id)
-        return resp.user.email if resp.user else None
-    except Exception:
+        return datetime.fromisoformat(expires_at).astimezone(timezone.utc).date()
+    except (TypeError, ValueError):
         return None
+
+
+def _latest_expiry_by_user(since: date) -> dict[str, dict]:
+    """
+    user_id -> {"expires_on": date, "name": str} con el vencimiento más lejano
+    de cada usuario, considerando sólo pagos aprobados que vencen desde `since`.
+    Un pago anterior a `since` nunca puede ser el más lejano de un usuario que
+    nos interese, así que no hace falta traerlo.
+    """
+    resp = (
+        get_supabase().table("payments")
+        .select("user_id, expires_at, profiles(name)")
+        .eq("status", "success")
+        .gte("expires_at", since.isoformat())
+        .execute()
+    )
+    latest: dict[str, dict] = {}
+    for row in resp.data or []:
+        expires_on = _parse_expiry_date(row.get("expires_at"))
+        if not expires_on:
+            continue
+        current = latest.get(row["user_id"])
+        if current is None or expires_on > current["expires_on"]:
+            latest[row["user_id"]] = {
+                "expires_on": expires_on,
+                "name": (row.get("profiles") or {}).get("name") or "miembro",
+            }
+    return latest
+
+
+def _users_without_reminder() -> set[str]:
+    """
+    Usuarios a los que no se les avisa nada: los que tienen un plan indefinido
+    aprobado (expires_at NULL, nunca vencen) y los que ya mandaron un pago que
+    está esperando revisión (ya renovaron; falta que se apruebe).
+    """
+    supabase = get_supabase()
+    indefinite = (
+        supabase.table("payments").select("user_id")
+        .eq("status", "success").is_("expires_at", "null").execute()
+    )
+    pending = supabase.table("payments").select("user_id").eq("status", "pending").execute()
+    return {r["user_id"] for r in (indefinite.data or []) + (pending.data or [])}
+
+
+def _get_email_map() -> dict[str, str]:
+    """user_id -> email con la Auth admin API, paginando (list_users trae 50 por defecto)."""
+    emails: dict[str, str] = {}
+    page = 1
+    while True:
+        users = get_supabase().auth.admin.list_users(page=page, per_page=1000)
+        for u in users or []:
+            if u.email:
+                emails[u.id] = u.email
+        if not users or len(users) < 1000:
+            return emails
+        page += 1
+
+
+def _send_batch(messages: list[dict]) -> int:
+    """
+    Envía en lotes de hasta 100 con la Batch API de Resend (un solo request por
+    lote, así no se choca con el límite de ~2 requests/segundo). Devuelve
+    cuántos salieron; un lote que falla se registra y se cuenta como no enviado.
+    """
+    s = get_settings()
+    if not messages:
+        return 0
+    if not s.is_email_configured():
+        logger.warning("[email] RESEND_API_KEY no configurado — %d emails omitidos", len(messages))
+        return 0
+    resend.api_key = s.resend_api_key
+    sent = 0
+    for i in range(0, len(messages), _RESEND_BATCH_LIMIT):
+        chunk = [{"from": s.from_email, **m} for m in messages[i:i + _RESEND_BATCH_LIMIT]]
+        try:
+            resend.Batch.send(chunk)
+            sent += len(chunk)
+            for m in chunk:
+                logger.info("[email] sent '%s' → %s", m["subject"], m["to"][0])
+        except Exception as exc:
+            logger.error("[email] batch FAILED (%d emails): %s", len(chunk), exc)
+    return sent
 
 
 def dispatch_renewal_reminders() -> dict:
     """
-    Envía correos de renovación. Llamar una vez al día vía cron.
+    Envía los correos de renovación del día. Llamar una vez al día vía cron.
+
+    Con hoy = fecha UTC, a cada usuario según su vencimiento más lejano:
+      - vence hoy+5  → aviso de 5 días
+      - vence hoy+1  → aviso de 1 día
+      - venció ayer  → aviso de suscripción vencida. Se manda al día siguiente
+        y no el mismo día para no avisarle "ha vencido" a quien vence más tarde
+        hoy y todavía tiene acceso.
+    Cada caso corresponde a una sola fecha, así que correrlo dos veces el mismo
+    día no cambia a quién le toca.
+
     Retorna un resumen de cuántos correos se enviaron por categoría.
     """
-    logger.info("[email.renewal] starting dispatch")
+    today = datetime.now(timezone.utc).date()
+    logger.info("[email.renewal] starting dispatch today=%s", today)
     sent = {"5_days": 0, "1_day": 0, "expired": 0, "errors": 0}
 
-    for days, key in [(5, "5_days"), (1, "1_day")]:
-        for row in _fetch_expiring(days):
-            user_id = row.get("user_id")
-            name = (row.get("profiles") or {}).get("name") or "miembro"
-            expires_at = row.get("expires_at", "")
-            expires_date = expires_at[:10] if expires_at else "—"
-            to = _get_email(user_id)
+    try:
+        latest = _latest_expiry_by_user(since=today - timedelta(days=1))
+        skip = _users_without_reminder()
+    except Exception as exc:
+        logger.error("[email.renewal] fetch payments FAILED: %s", supabase_error(exc), exc_info=True)
+        sent["errors"] += 1
+        return sent
+
+    targets: dict[str, list[tuple[str, dict]]] = {"5_days": [], "1_day": [], "expired": []}
+    for user_id, info in latest.items():
+        if user_id in skip:
+            continue
+        delta = (info["expires_on"] - today).days
+        key = {5: "5_days", 1: "1_day", -1: "expired"}.get(delta)
+        if key:
+            targets[key].append((user_id, info))
+
+    if not any(targets.values()):
+        logger.info("[email.renewal] done (nadie para avisar hoy) — %s", sent)
+        return sent
+
+    try:
+        email_map = _get_email_map()
+    except Exception as exc:
+        logger.error("[email.renewal] fetch emails FAILED: %s", supabase_error(exc), exc_info=True)
+        sent["errors"] += sum(len(t) for t in targets.values())
+        return sent
+
+    for key, days in (("5_days", 5), ("1_day", 1), ("expired", None)):
+        messages = []
+        for user_id, info in targets[key]:
+            to = email_map.get(user_id)
             if not to:
+                logger.warning("[email.renewal] sin email user_id=%s", user_id)
                 sent["errors"] += 1
                 continue
-            ok = send_renewal_reminder(to, name, days, expires_date)
-            if ok:
-                sent[key] += 1
+            if days is None:
+                subject, html = _EXPIRED_SUBJECT, _expired_html(info["name"])
             else:
-                sent["errors"] += 1
-
-    for row in _fetch_expired_today():
-        user_id = row.get("user_id")
-        name = (row.get("profiles") or {}).get("name") or "miembro"
-        to = _get_email(user_id)
-        if not to:
-            sent["errors"] += 1
-            continue
-        ok = send_expired_notice(to, name)
-        if ok:
-            sent["expired"] += 1
-        else:
-            sent["errors"] += 1
+                subject = _renewal_subject(days)
+                html = _renewal_reminder_html(info["name"], days, info["expires_on"].isoformat())
+            messages.append({"to": [to], "subject": subject, "html": html})
+        delivered = _send_batch(messages)
+        sent[key] += delivered
+        sent["errors"] += len(messages) - delivered
 
     logger.info("[email.renewal] done — %s", sent)
     return sent

@@ -255,17 +255,62 @@ def _members_demographics(profiles: list) -> dict:
     }
 
 
-def _revenue_summary(revenue: dict) -> dict:
+def _revenue_by_plan(supabase) -> list:
+    """
+    Ingresos (USD, pagos aprobados) por plan, con el nombre de `plans`.
+
+    v_stats_revenue sólo trae columnas fijas para 1m/3m/6m/1y, así que un plan
+    creado desde el panel nunca aparecería; por eso se suma aquí desde payments.
+    Incluye los planes activos aunque estén en 0 y cualquier plan con ingresos,
+    ordenados como en el panel de planes.
+    """
+    totals: dict[str, float] = {}
+    offset = 0
+    while True:
+        try:
+            result = _execute_with_retry(
+                supabase.table("payments").select("plan, amount").eq("status", "success")
+                .range(offset, offset + _PROFILES_PAGE_SIZE - 1),
+                context="_revenue_by_plan",
+            )
+        except Exception as exc:
+            msg = supabase_error(exc)
+            logger.error("[analytics._revenue_by_plan] FAILED offset=%d [%s] %s", offset, type(exc).__name__, msg, exc_info=True)
+            raise HTTPException(status_code=500, detail=msg)
+        page = result.data or []
+        for row in page:
+            totals[row["plan"]] = totals.get(row["plan"], 0.0) + float(row.get("amount") or 0)
+        if len(page) < _PROFILES_PAGE_SIZE:
+            break
+        offset += _PROFILES_PAGE_SIZE
+
+    try:
+        plans = supabase.table("plans").select("code, name, sort_order, is_active").execute().data or []
+    except Exception as exc:
+        logger.warning("[analytics._revenue_by_plan] plans lookup FAILED [%s]", supabase_error(exc))
+        plans = []
+    by_code = {p["code"]: p for p in plans}
+
+    codes = [p["code"] for p in plans if p.get("is_active")] + [c for c in totals if c not in by_code or not by_code[c].get("is_active")]
+    rows = [
+        {
+            "code": code,
+            "name": (by_code.get(code) or {}).get("name") or code,
+            "total": round(totals.get(code, 0.0), 2),
+            "_order": (by_code.get(code) or {}).get("sort_order", 9999),
+        }
+        for code in dict.fromkeys(codes)
+    ]
+    rows.sort(key=lambda r: r.pop("_order"))
+    return rows
+
+
+def _revenue_summary(revenue: dict, by_plan: list) -> dict:
     return {
         "today": _num(revenue, "revenue_today"),
         "this_month": _num(revenue, "revenue_this_month"),
         "total": _num(revenue, "revenue_total"),
-        "by_plan": {
-            "1m": _num(revenue, "revenue_plan_1m"),
-            "3m": _num(revenue, "revenue_plan_3m"),
-            "6m": _num(revenue, "revenue_plan_6m"),
-            "1y": _num(revenue, "revenue_plan_1y"),
-        },
+        "by_plan": by_plan,
         "payments_pending": _num(revenue, "payments_pending"),
         "non_renewals": _num(revenue, "non_renewals"),
     }
@@ -300,7 +345,7 @@ def get_overview() -> dict:
 
     response = {
         "members": _members_summary(profiles),
-        "revenue": _revenue_summary(revenue),
+        "revenue": _revenue_summary(revenue, _revenue_by_plan(supabase)),
     }
 
     cache_set(cache_key, response, _OVERVIEW_CACHE_TTL)
@@ -350,7 +395,7 @@ def get_revenue_detail() -> dict:
     Detalle completo de ingresos en tiempo real desde v_stats_revenue.
 
     Returns:
-        {"today", "this_month", "total", "by_plan": {...}, "payments_pending", "non_renewals"}
+        {"today", "this_month", "total", "by_plan": [{code, name, total}], "payments_pending", "non_renewals"}
     Raises:
         HTTPException 500 — fallo de base de datos
     """
@@ -365,7 +410,7 @@ def get_revenue_detail() -> dict:
     supabase = get_supabase()
 
     revenue = _select_single_row(supabase, "v_stats_revenue")
-    response = _revenue_summary(revenue)
+    response = _revenue_summary(revenue, _revenue_by_plan(supabase))
 
     cache_set(cache_key, response, _REVENUE_CACHE_TTL)
     logger.info("[analytics.revenue] OK")

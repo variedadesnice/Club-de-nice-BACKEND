@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from app.core.exceptions import supabase_error
 from app.core.supabase import get_supabase
+from app.services import sendhook
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,19 @@ def _serialize_field(f: dict, include_admin: bool) -> dict:
     return item
 
 
+def _auto_verify_bank(fields: list[dict]) -> "str | None":
+    """
+    Slug de SendHook al que resuelve el campo "Banco" del método, con la misma
+    regla que usa la verificación real (payments._get_destination_bank_slug).
+    None si no hay campo "Banco", si está vacío o si SendHook no lo soporta.
+    Así el panel avisa con la lógica del backend en vez de llevar su propia copia.
+    """
+    banco = next((f for f in fields if f["field_label"].strip().lower() == "banco"), None)
+    return sendhook.normalize_bank_label(banco.get("value")) if banco and banco.get("value") else None
+
+
 def _serialize_method(method: dict, fields: list[dict], include_admin: bool) -> dict:
-    return {
+    item = {
         "id": method["id"],
         "name": method["name"],
         "description": method.get("description"),
@@ -94,6 +106,9 @@ def _serialize_method(method: dict, fields: list[dict], include_admin: bool) -> 
         "sort_order": method.get("sort_order"),
         "fields": [_serialize_field(f, include_admin) for f in fields],
     }
+    if include_admin:
+        item["auto_verify_bank"] = _auto_verify_bank(fields)
+    return item
 
 
 def _get_method_or_404(supabase, method_id: str) -> dict:

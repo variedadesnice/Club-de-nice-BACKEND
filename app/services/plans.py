@@ -240,6 +240,20 @@ def admin_delete_plan(plan_id: str) -> dict:
     return {"deleted": True}
 
 
+def get_plan_names(supabase) -> dict[str, dict]:
+    """
+    code -> {"name", "sort_order"} de TODOS los planes, activos o no: un pago
+    viejo puede ser de un plan que ya se desactivó y igual hay que nombrarlo.
+    No fatal — si falla devuelve {} y quien la usa cae al código crudo.
+    """
+    try:
+        resp = supabase.table("plans").select("code, name, sort_order").execute()
+    except Exception as exc:
+        logger.warning("[plans.get_plan_names] FAILED [%s] %s", type(exc).__name__, supabase_error(exc))
+        return {}
+    return {p["code"]: {"name": p["name"], "sort_order": p.get("sort_order") or 0} for p in (resp.data or [])}
+
+
 def get_plan_duration_days(supabase, plan_code: str) -> Optional[int]:
     """
     Duración en días del plan (None = indefinido, sin vencimiento). Usado por

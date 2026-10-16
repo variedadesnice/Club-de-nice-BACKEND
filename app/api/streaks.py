@@ -19,7 +19,7 @@ def checkin(
 ):
     """Registra el login diario del usuario llamando al RPC register_daily_login()."""
     token = _extract_token(authorization)
-    return streaks_service.checkin(token)
+    return streaks_service.checkin(token, current_user["id"])
 
 
 @router.get("/me")

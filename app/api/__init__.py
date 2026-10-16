@@ -9,6 +9,7 @@ from app.api.admin_lives import router as admin_lives_router
 from app.api.analytics import router as analytics_router
 from app.api.auth import router as auth_router
 from app.api.classroom import router as classroom_router
+from app.api.content_categories import router as admin_content_categories_router, public_router as content_categories_router
 from app.api.courses import router as courses_router
 from app.api.invitations import router as invitations_router
 from app.api.levels import router as levels_router
@@ -47,6 +48,8 @@ api_router.include_router(admin_achievements_router, prefix="/admin/achievements
 api_router.include_router(analytics_router, prefix="/admin/analytics", tags=["admin-analytics"])
 api_router.include_router(classroom_router, prefix="/classroom", tags=["classroom"])
 api_router.include_router(admin_classroom_router, prefix="/admin/classroom", tags=["admin-classroom"])
+api_router.include_router(content_categories_router, prefix="/content-categories", tags=["content-categories"])
+api_router.include_router(admin_content_categories_router, prefix="/admin/content-categories", tags=["admin-content-categories"])
 api_router.include_router(lives_router, prefix="/lives", tags=["lives"])
 api_router.include_router(admin_lives_router, prefix="/admin/lives", tags=["admin-lives"])
 api_router.include_router(currencies_router, prefix="/currencies", tags=["currencies"])

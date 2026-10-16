@@ -22,6 +22,14 @@ def get_my_summary(user_id: str, token: str) -> dict:
     """
     logger.info("[profile.get_my_summary] user_id=%s", user_id)
 
+    # El check-in va primero: puede otorgar hitos de racha/antigüedad, y así el
+    # nivel y las insignias de esta misma respuesta ya los incluyen.
+    streak = None
+    try:
+        streak = streaks_service.checkin(token, user_id)
+    except Exception as exc:
+        logger.warning("[profile.get_my_summary] streak FAILED user_id=%s [%s]", user_id, supabase_error(exc))
+
     level = None
     try:
         level = levels_service.get_user_level(user_id)
@@ -33,12 +41,6 @@ def get_my_summary(user_id: str, token: str) -> dict:
         achievements = levels_service.get_my_achievements(user_id)
     except Exception as exc:
         logger.warning("[profile.get_my_summary] achievements FAILED user_id=%s [%s]", user_id, supabase_error(exc))
-
-    streak = None
-    try:
-        streak = streaks_service.checkin(token)
-    except Exception as exc:
-        logger.warning("[profile.get_my_summary] streak FAILED user_id=%s [%s]", user_id, supabase_error(exc))
 
     completed_courses = 0
     try:

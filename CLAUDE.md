@@ -69,6 +69,7 @@ app/
     users.py               # GET /users/{user_id}/profile — public profile for the feed's profile drawer
     promo_banners.py       # router: admin CRUD/activate · public_router: GET /promo-banners/active (Comunidad ad banner)
     profile.py             # GET /profile/me/summary — aggregates the own-profile endpoints into one request
+    content_categories.py  # public_router: GET /content-categories/ · router: admin CRUD/toggle
   services/               # All business logic lives here (mirrors app/api/ module names)
     email.py               # Resend integration — all transactional email templates + dispatch_renewal_reminders()
     raffles.py             # Schedule/draw split, single-pending-raffle rule, 24h winner visibility, winner email resolution
@@ -76,6 +77,7 @@ app/
     users.py               # get_public_profile() — each stat section is independently non-fatal
     profile.py             # get_my_summary() — thin composition layer, reuses levels/streaks/classroom/posts services as-is
     promo_banners.py       # set_active() mirrors lives.py's exclusive-activation pattern — only one banner active at a time
+    content_categories.py  # Keeps courses.category in sync: rename cascades to courses, delete refused (409) while courses use it
   schemas/                # Pydantic request/response models (mirrors app/api/ module names)
     raffles.py             # CreateRaffleRequest, RaffleOut, WinnerOut
     roulette.py            # PrizeOut (admin, has weight) vs PublicPrizeOut (member, no weight)
@@ -92,6 +94,7 @@ app/
 /api/levels  /api/achievements  /api/admin/levels  /api/admin/achievements
 /api/admin/analytics
 /api/classroom  /api/admin/classroom
+/api/content-categories  /api/admin/content-categories
 /api/lives  /api/admin/lives
 /api/currencies  /api/admin/currencies
 /api/streaks
@@ -233,6 +236,11 @@ Status computed on read: `"pendiente"` / `"usada"` / `"expirada"`.
 
 `module` is auto-maintained by `_sync_module_label()` called after chapter changes: `"Sin capítulos"` / `"{title}"` (1 chapter) / `"N capítulos"`.
 
+### `content_categories`
+`id`, `name` (unique case-insensitive), `description` (nullable — shortcut subtitle), `icon` (`play`|`check`|`doc`|`flask`, CHECK constraint — the frontend has one SVG per key), `sort_order`, `is_active`, `created_at`, `updated_at`. RLS enabled, no policies. Created by `sql/content_categories.sql` (apply by hand; seeds the 4 categories that used to be hardcoded in the frontend: Cursos, Probando marcas, Guías digitales, Laboratorios).
+
+`courses.category` stays a plain text column holding a category `name` — no FK. `app/services/content_categories.py` is what keeps them aligned: renaming a category also renames `courses.category` on its courses (and clears the `courses:all` cache); deleting returns 409 while any course uses it (deactivate instead). Courses whose category isn't in the table (e.g. the old default `"General"`) still list under "Todos" in Classroom.
+
 ### `chapter_pdfs`
 `id`, `chapter_id` FK → course_chapters, `title`, `file_url`, `sort_order`, `created_at`. Stored in bucket `chapter-pdfs` at `{chapter_id}/{timestamp}_{safe_filename}`.
 
@@ -308,6 +316,8 @@ Simple key/value table used by pg_cron functions to read secrets at runtime with
 
 ### Streaks
 Daily check-in tracked via RPC `register_daily_login()`. `GET /api/streaks/checkin` registers today's login and returns streak info (including `milestone_reached` when a streak threshold is hit); `GET /api/streaks/me` reads current streak without registering.
+
+**Milestone achievements are awarded in Python, not by the RPC.** Verified 2026-10-11: `register_daily_login()` tracks the streak but never wrote `user_achievements`/`xp_transactions` (a member hit 7 days and had no `streak_3`/`streak_7`), and nothing awarded `member_*`. `streaks.checkin(token, user_id)` now calls `_award_milestones()` after the RPC: `streak_3/7/14/30/60/100` against the user's **longest** streak, and `member_1_month/6_months/1_year` against days since their first approved payment (`paid_at`), using `>=` so a missed day on the exact threshold doesn't lose it. One query for earned codes; only missing ones go through `process_achievement`. Returned as `new_achievements`. `login_30_days` ("Racha de 30 Días") is deliberately **not** awarded — it duplicates `streak_30`; deactivate it in the admin panel rather than pay it twice. `get_my_summary()` runs the check-in first so the same response already includes what it awarded.
 
 ### Supabase Storage Buckets
 | Bucket | Used for |
@@ -392,7 +402,9 @@ Uses **Resend** (`resend` PyPI package). Degrades gracefully if `RESEND_API_KEY`
 | `send_raffle_winner(to, name, raffle_title)` | `raffles.draw_raffle()` success, per winner | fire-and-forget (thread) |
 | `dispatch_renewal_reminders()` | cron endpoint or admin manual trigger | synchronous, returns summary dict |
 
-**Renewal reminder logic**: `dispatch_renewal_reminders()` queries `payments` for `status='success'` records where `expires_at::date` equals `today+5`, `today+1`, or `today` (exactly, not a range) — so each reminder fires exactly once per payment cycle. Called daily by pg_cron at 9:00 AM UTC.
+**Renewal reminder logic**: `dispatch_renewal_reminders()` evaluates each **user** by their *latest* approved `expires_at` (not payment by payment — someone who renewed early still has an old payment expiring and must not be told it's expiring). With `today` = UTC date: latest expiry on `today+5` → 5-day reminder, `today+1` → 1-day reminder, **yesterday** → expired notice (sent the day after, so nobody expiring later today gets "ha vencido" while still active). Users with an approved indefinite plan (`expires_at NULL`) or a `pending` payment are skipped. Each case is a single date, so running it twice the same day targets the same people. Called daily by pg_cron at 9:00 UTC.
+
+> ⚠️ **Keep it fast — pg_net cuts the request.** The cron calls this over HTTP via `net.http_post`, whose default timeout is 5 s; the endpoint takes ~4 s on a Vercel cold start even with nobody to email. Until 2026-10-11 the job had no `timeout_milliseconds` and the dispatch did 2 sequential calls per recipient, so on any day with recipients the request was cut and **no reminder was ever sent**. Now the dispatch does a fixed number of round trips (3 DB queries, one paginated `auth.admin.list_users()`, one `resend.Batch.send` per 100 emails), and `sql/daily_renewal_reminders_cron.sql` re-creates the job with `timeout_milliseconds := 60000` — apply it by hand in the Supabase SQL editor. Don't reintroduce per-recipient API calls in this path.
 
 **Password reset flow**: `POST /api/auth/forgot-password` calls `supabase.auth.admin.generate_link({type: "recovery", email, options: {redirect_to: APP_URL+"/reset-password"}})` to get `properties.action_link`, then sends it via Resend. Always returns 200 to avoid revealing whether email exists. Clicking the emailed link hits Supabase's own `/auth/v1/verify` endpoint, which verifies the token and 302-redirects to `redirect_to` with the session in the URL **fragment** (`#access_token=...&type=recovery&...`) — implicit-flow style, since admin-generated links have no PKCE `code_verifier` to exchange. The frontend's `ResetPassword.tsx` reads that fragment client-side (never sent to any server as part of routing) and posts `{access_token, new_password}` to `POST /api/auth/reset-password`, which validates the token the same way `get_current_user` validates any JWT (`supabase.auth.get_user(token)`) and then calls `auth.admin.update_user_by_id(user.id, {"password": new_password})`.
 
@@ -578,8 +590,8 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 | GET | `/api/payments/diagnostic-ip` | — | — | `{outbound_ip}` — backend's outbound IP, for whitelisting with the Pago Móvil verification provider |
 | POST | `/api/payments/register` | — | `{name, email, password, plan, amount, amount_local, currency_id, exchange_rate, payment_method_id, reference_number, phone, receipt_path, origin_bank?, payer_id_number?, payer_phone?, payment_date?}` | `{user, payment, message}` — auto-approved if the method has automatic Pago Móvil verification enabled and the external API confirms it |
 | POST | `/api/payments/renew` | 🔑 | Same optional Pago Móvil fields as `/register` | `{payment, message}` (201) — renewal payment for an already-registered user, same "pending"/auto-verify flow as registration |
-| GET | `/api/payments/` | 👑 | — | `[Payment]` with user_name, ordered newest first |
-| GET | `/api/payments/{user_id}` | 🔑 | — | `[Payment]` for that user |
+| GET | `/api/payments/` | 👑 | — | `[Payment]` with user_name, user_email and `plan_name` (from `plans`, falls back to the code), newest first |
+| GET | `/api/payments/{user_id}` | 🔑 | — | `[Payment]` for that user, with `plan_name` |
 | PATCH | `/api/payments/{id}/approve` | 👑 | — | Payment (sets status=success, expires_at) |
 | PATCH | `/api/payments/{id}/reject` | 👑 | — | Payment (sets status=failed) |
 | GET | `/api/payments/{id}/receipt` | 👑 | — | `{url, expires_in: 3600}` |
@@ -593,7 +605,7 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 ### Payment Methods — admin (`/api/admin/payment-methods`, 👑)
 | Method | Path | Body | Returns |
 |--------|------|------|---------|
-| GET | `/api/admin/payment-methods/` | — | All methods (active + inactive) |
+| GET | `/api/admin/payment-methods/` | — | All methods (active + inactive), each with `auto_verify_bank` — the SendHook slug its "Banco" field resolves to (`sendhook.normalize_bank_label`), or `null`. The admin panel warns from this instead of keeping its own bank list. |
 | POST | `/api/admin/payment-methods/` | `{name, description?, fields?}` | Method (201) |
 | PATCH | `/api/admin/payment-methods/{method_id}` | `{name?, description?, is_active?, sort_order?}` | Method |
 | PATCH | `/api/admin/payment-methods/{method_id}/toggle` | — | Method |
@@ -692,7 +704,7 @@ Still the primary CRUD path used by the frontend admin classroom UI.
 |--------|------|--------|---------|
 | GET | `/api/admin/analytics/overview` | — | Real-time members + revenue summary |
 | GET | `/api/admin/analytics/members` | — | Member totals, gender, city, age-range breakdown |
-| GET | `/api/admin/analytics/revenue` | — | Real-time revenue detail |
+| GET | `/api/admin/analytics/revenue` | — | Real-time revenue detail. `by_plan` is a list `[{code, name, total}]` summed in Python from approved payments (active plans + any plan with revenue) — `v_stats_revenue` only has fixed columns for 1m/3m/6m/1y, so it isn't used for this field. |
 | GET | `/api/admin/analytics/history` | `?from_date&to_date&limit=30(max 365)` | Daily snapshots, newest first |
 | POST | `/api/admin/analytics/snapshot` | — | Forces today's snapshot generation/refresh |
 
@@ -742,6 +754,16 @@ Winner eligibility: `subscription_status='active'` AND `role='miembro'`. Returns
 |--------|------|---------|
 | GET | `/api/roulette/status` | `{is_active, already_spun_today, prizes: [PublicPrizeOut]}` — prizes have **no** `weight` |
 | POST | `/api/roulette/spin` | `{prize_id, label, color}` — 400 if inactive or already spun today (UTC) |
+
+### Content categories (`/api/content-categories`, public read · `/api/admin/content-categories`, 👑)
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| GET | `/api/content-categories/` | — | Active categories, ordered by sort_order |
+| GET | `/api/admin/content-categories/` | — | All categories, each with `course_count` |
+| POST | `/api/admin/content-categories/` | `{name, description?, icon?, sort_order?, is_active?}` | Category (201, 409 if name taken) |
+| PATCH | `/api/admin/content-categories/{id}` | `{name?, description?, icon?, sort_order?}` | Category — renaming cascades to `courses.category` |
+| PATCH | `/api/admin/content-categories/{id}/toggle` | — | Category |
+| DELETE | `/api/admin/content-categories/{id}` | — | `{deleted: true}` (409 if it has courses) |
 
 ### Promo Banners — admin (`/api/admin/promo-banners`, 👑)
 | Method | Path | Body | Returns |
@@ -804,7 +826,7 @@ The cron endpoint uses `Authorization: Bearer <SUPABASE_SERVICE_ROLE_KEY>` (vali
 - **Achievement idempotency**: non-repeatable achievements silently skip if already earned; repeatable ones respect `daily_limit`.
 - **Frozen exchange rate**: `payments.exchange_rate` and `amount_local` are snapshots taken at registration time — never recalculate retroactively even if the BCV rate changes later.
 - **Emails are fire-and-forget**: `send_welcome` and `send_payment_approved` run in daemon threads — a failed email never rolls back the main operation. `dispatch_renewal_reminders` is synchronous since it's called from a dedicated endpoint.
-- **Renewal reminders fire once per cycle**: queries use exact date equality (`expires_at::date = today+N`) not ranges, so each reminder sends exactly once. Running the cron more than once per day on the same date is safe.
+- **Renewal reminders fire once per cycle, per user**: each reminder matches one exact date of the user's latest expiry (`today+5`, `today+1`, `yesterday`), so each fires once. Running the cron more than once on the same day re-targets the same people (it would re-send), so don't trigger it manually after the 9:00 UTC run.
 - **Raffle eligibility is point-in-time**: winner selection queries active members at *draw* time (not creation time, since those are now separate steps) — no caching. Minimum 1 winner and enough eligible members required.
 - **Raffle draw is automatic but overridable**: `draw-scheduled-raffles` (pg_cron, every 10 min) draws any raffle past its `draw_at`. Admins can also force an early draw via `POST /api/admin/raffles/{id}/draw`. Either way, `drawn_at` is what flips a raffle from "pending" to "drawn".
 - **Only one pending raffle at a time**: `create_raffle()` rejects (400) if `_get_pending_raffle()` (`drawn_at IS NULL`) already returns one. Delete or draw the pending raffle before scheduling another.
